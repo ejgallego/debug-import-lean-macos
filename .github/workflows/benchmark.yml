@@ -1,0 +1,125 @@
+name: Debug Lean import on macOS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Measured processes per platform
+        required: false
+        default: "7"
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: debug-import-lean-macos
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Benchmark (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+          - platform: macos
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      LEAN_NUM_THREADS: "1"
+      PYTHONHASHSEED: "0"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select the latest Mathlib-compatible Lean nightly
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://raw.githubusercontent.com/leanprover-community/mathlib4-nightly-testing/nightly-testing/lean-toolchain \
+            --output lean-toolchain.next
+          mv lean-toolchain.next lean-toolchain
+
+      - name: Install Lean
+        uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: false
+
+      - name: Resolve matching Mathlib nightly
+        run: lake update
+
+      - name: Download Mathlib build artifacts
+        run: lake exe cache get
+
+      - name: Measure import
+        env:
+          BENCHMARK_RUNS: ${{ inputs.runs || '7' }}
+        run: |
+          python3 scripts/benchmark.py \
+            --platform "${{ matrix.platform }}" \
+            --runs "$BENCHMARK_RUNS"
+
+      - name: Upload raw data and trace
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.platform }}
+          path: results/${{ matrix.platform }}/
+          if-no-files-found: error
+          retention-days: 30
+
+  report:
+    name: Compare results
+    needs: benchmark
+    if: ${{ always() && needs.benchmark.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download benchmark artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: benchmark-*
+          path: artifacts
+
+      - name: Generate report
+        id: generate
+        continue-on-error: true
+        run: |
+          python3 scripts/report.py \
+            --linux artifacts/benchmark-linux/benchmark.json \
+            --macos artifacts/benchmark-macos/benchmark.json \
+            --markdown results/report/report.md \
+            --json results/report/comparison.json \
+            --strict
+
+      - name: Publish job summary
+        if: always()
+        run: |
+          if [[ -f results/report/report.md ]]; then
+            cat results/report/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Report generation failed before producing Markdown." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-report
+          path: results/report/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Require a valid comparable report
+        if: ${{ always() && steps.generate.outcome == 'failure' }}
+        run: exit 1

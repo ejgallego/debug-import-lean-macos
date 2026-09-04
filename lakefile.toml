@@ -1,0 +1,11 @@
+name = "debug-import-lean-macos"
+version = "0.1.0"
+defaultTargets = ["ImportMathlib"]
+
+[[lean_lib]]
+name = "ImportMathlib"
+
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4-nightly-testing.git"
+rev = "nightly-testing"
