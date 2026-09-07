@@ -34,7 +34,8 @@ def worker(spec: dict) -> int:
     timeline = []
     with (output / f"{name}.stdout").open("w") as out, (output / f"{name}.stderr").open("w") as err, (output / f"{name}-sample-tool.txt").open("w") as sample_log:
         started = time.monotonic()
-        target = subprocess.Popen(spec["command"], stdout=out, stderr=err, start_new_session=True)
+        target = subprocess.Popen(spec["command"], stdout=out, stderr=err, start_new_session=True,
+                                  env={**os.environ, **spec.get("environment", {})})
         if diagnostic:
             command = ["sample", str(target.pid), "120", "1", "-mayDie", "-file", str(output / f"{name}.sample.txt")]
             sample_record = {"command": command, "target_pid": target.pid}

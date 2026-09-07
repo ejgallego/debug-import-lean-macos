@@ -1,0 +1,45 @@
+name: ARM Lean phase timings
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiments/lean-arm-phases]
+permissions:
+  contents: read
+concurrency:
+  group: lean-arm-phases-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  phases:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      LEAN_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned Lean
+        uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: false
+      - name: Download pinned artifacts
+        run: |
+          lake exe cache get
+          git diff --exit-code -- lean-toolchain lake-manifest.json
+      - name: Build passive timers
+        run: |
+          mkdir -p results/lean-arm-phases
+          cc -O2 -g -std=c11 -Wall -Wextra -Werror -dynamiclib \
+            repro/lean-io-timing.c -o results/lean-arm-phases/lean-io-timing.dylib
+      - name: Measure loading and finalization
+        run: lake env python3 scripts/run-lean-phases.py --output results/lean-arm-phases
+      - name: Publish diagnostics and controls
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lean-arm-phases
+          path: results/lean-arm-phases/
+          if-no-files-found: warn
+          retention-days: 30
