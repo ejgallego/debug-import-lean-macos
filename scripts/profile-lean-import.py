@@ -103,7 +103,7 @@ def worker(spec: dict) -> int:
 
 def summary(output: Path, records: list[dict]) -> None:
     lines = ["# Actual Lean import profile", "",
-             "The first run is retained as warmup. Baselines have no sampler or timeline monitoring.",
+             "The first import is retained separately (sampled only with --sample-initial). Baselines have no sampler or timeline monitoring.",
              "CPU, faults, and peak RSS come from wait4 on the direct Lean PID; VM snapshots are host-wide.", "",
              "| Run | Wall s | User s | System s | Peak RSS MiB | Minor faults | Major faults | Exit |",
              "|---|---:|---:|---:|---:|---:|---:|---:|"]
@@ -124,9 +124,12 @@ def main() -> int:
     parser.add_argument("--source", default="ImportMathlibModule.lean", choices=["ImportMathlibModule.lean", "ImportMathlib.lean"])
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--no-sample", action="store_true", help="local Linux smoke control")
+    parser.add_argument("--sample-initial", action="store_true", help="also profile the first Mathlib import on this runner")
     args = parser.parse_args()
     if not 0 < args.timeout <= 600:
         parser.error("timeout must be in (0, 600]")
+    if args.sample_initial and args.no_sample:
+        parser.error("--sample-initial requires sampling")
     if not args.no_sample and (sys.platform != "darwin" or platform.machine() != "arm64"):
         parser.error("native sampling requires ARM macOS; use --no-sample for a local control")
     output = args.output.resolve()
@@ -150,7 +153,7 @@ def main() -> int:
                 "toolchain": Path("lean-toolchain").read_text().strip(),
                 "source_commit": capture(["git", "rev-parse", "HEAD"]),
                 "git_status": capture(["git", "status", "--short"]),
-                "script_sha256": digest(__file__), "timeout": args.timeout,
+                "script_sha256": digest(__file__), "timeout": args.timeout, "sample_initial": args.sample_initial,
                 "environment": {k: os.environ.get(k) for k in ["LEAN_PATH", "LEAN_NUM_THREADS", "RUNNER_ARCH", "ImageOS", "ImageVersion", "GITHUB_RUN_ID"]}}
     if sys.platform == "darwin":
         metadata["memory_bytes"] = int(capture(["sysctl", "-n", "hw.memsize"]))
@@ -158,7 +161,8 @@ def main() -> int:
         subprocess.run(["sh", "-c", "MANPAGER=cat man sample"], stdout=(output / "sample-man.txt").open("w"), stderr=subprocess.STDOUT, timeout=10, check=False)
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     records = []
-    cases = [("warmup", False), ("baseline-1", False), ("baseline-2", False)]
+    cases = [("initial-sampled", True) if args.sample_initial else ("warmup", False),
+             ("baseline-1", False), ("baseline-2", False)]
     if not args.no_sample:
         cases.append(("sampled", True))
     cases.append(("baseline-3", False))
@@ -174,11 +178,15 @@ def main() -> int:
         snapshot(output, f"{name}-after")
         summary(output, records)
     if not args.no_sample:
-        r = next(r for r in records if r["name"] == "sampled")
-        profile = output / "sampled.sample.txt"
-        usable = r["sample"].get("exit_code") == 0 and profile.exists() and "Call graph:" in profile.read_text()
-        (output / "profile-status.json").write_text(json.dumps({"sampler_completed_with_call_graph": usable}, indent=2)+"\n")
-        failed |= not usable
+        statuses = {}
+        for r in records:
+            if r["sample"] is None:
+                continue
+            profile = output / f"{r['name']}.sample.txt"
+            usable = r["sample"].get("exit_code") == 0 and profile.exists() and "Call graph:" in profile.read_text()
+            statuses[r["name"]] = {"sampler_completed_with_call_graph": usable}
+            failed |= not usable
+        (output / "profile-status.json").write_text(json.dumps(statuses, indent=2)+"\n")
     return int(failed)
 
 

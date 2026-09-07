@@ -162,8 +162,6 @@ input identities, phase CSVs, process exit statuses and wall times, VM snapshots
 and job summaries. They are uploaded even when experiment steps fail. The ARM
 runner's smaller RAM is a potential pressure variable, not an OS-only comparison.
 
-## Initial local control
-
 ## Profile the remaining ARM import cost
 
 The `ARM Lean import profile` workflow runs only on `macos-15` (ARM), using the
@@ -175,14 +173,19 @@ env LEAN_NUM_THREADS=1 lake env python3 scripts/profile-lean-import.py \
   --output results/lean-arm-profile
 ```
 
-It retains the first import as warmup, runs two unprofiled imports, a separate
-native-sampled import, then one final unprofiled import. `wait4` reports CPU,
+It retains the first import separately, runs two unprofiled imports, a separate
+native-sampled import, then one final unprofiled import. CI also uses
+`--sample-initial` to profile the first import, before any Mathlib warmup. This is
+the cache state left by artifact download, not a controlled cold-cache condition.
+`wait4` reports CPU,
 peak RSS, faults, and resource counters for the direct Lean PID; profiler and
 monitoring processes are excluded. The diagnostic uses `sample` at 1 ms for up
 to 120 seconds, with `-mayDie` to retain symbols if Lean exits. It also records
 roughly one-second process/VM observations. Each Lean process has a five-minute
 timeout. Native samples include waiting threads and kernel-call boundaries;
 they do not supply internal kernel stacks or a CPU-only time breakdown.
+The sampling approach follows Apple's
+[description of native stack sampling](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/CodeSpeed/Articles/DiagnosingSlowness.html).
 
 Artifacts preserve raw profiles, the runner's `sample` manual, per-process
 metrics, diagnostic timelines, host-wide VM snapshots, and input identities.

@@ -34,7 +34,7 @@ jobs:
           lake exe cache get
           git diff --exit-code -- lean-toolchain lake-manifest.json
       - name: Profile the direct Lean process
-        run: lake env python3 scripts/profile-lean-import.py --output results/lean-arm-profile
+        run: lake env python3 scripts/profile-lean-import.py --output results/lean-arm-profile --sample-initial
       - name: Publish raw profiles and baselines
         if: always()
         uses: actions/upload-artifact@v7
