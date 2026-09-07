@@ -14,6 +14,8 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/mach_vm.h>
+#else
+#include <sys/prctl.h>
 #endif
 
 #include "lean-fault-regions.h"
@@ -24,14 +26,36 @@ struct event {
     char label[192];
     uint64_t wall_ns, value, trace_clock;
     uint64_t disk_read, disk_write, resident, compressed, decompressions;
-    int memory_valid;
+    int memory_valid, thp_valid;
+    uint64_t anon_huge_bytes, anonymous_bytes, census_ns;
     struct rusage usage;
 };
 static struct event events[CAPACITY];
 static size_t used;
 static int failed;
 static const char *output;
-static int memory_enabled;
+static int memory_enabled, thp_enabled;
+static int thp_initial=-1;
+static void thp_snapshot(struct event *e) {
+#ifndef __APPLE__
+    struct timespec begin,end;
+    if (clock_gettime(CLOCK_MONOTONIC,&begin)) { failed=1; return; }
+    FILE *f=fopen("/proc/self/smaps_rollup","r");
+    if (!f) { failed=1; return; }
+    char line[512]; unsigned long long value; int fields=0;
+    while (fgets(line,sizeof(line),f)) {
+        if (sscanf(line,"AnonHugePages: %llu kB",&value)==1) { e->anon_huge_bytes=value*1024; fields++; }
+        if (sscanf(line,"Anonymous: %llu kB",&value)==1) { e->anonymous_bytes=value*1024; fields++; }
+    }
+    if (ferror(f) || fields!=2) failed=1;
+    fclose(f);
+    if (clock_gettime(CLOCK_MONOTONIC,&end)) { failed=1; return; }
+    e->census_ns=(uint64_t)(end.tv_sec-begin.tv_sec)*1000000000+end.tv_nsec-begin.tv_nsec;
+    e->thp_valid=fields==2;
+#else
+    (void)e; failed=1;
+#endif
+}
 static void memory_snapshot(struct event *e) {
 #ifdef __APPLE__
     struct rusage_info_v4 r;
@@ -59,7 +83,12 @@ static void memory_snapshot(struct event *e) {
     e->memory_valid=1;
 }
 
-__attribute__((constructor)) static void setup(void) { output=getenv("LEAN_INNER_TIMING_OUTPUT"); memory_enabled=getenv("LEAN_MEMORY_TIMING")!=NULL; }
+__attribute__((constructor)) static void setup(void) { output=getenv("LEAN_INNER_TIMING_OUTPUT"); memory_enabled=getenv("LEAN_MEMORY_TIMING")!=NULL;
+    thp_enabled=getenv("LEAN_THP_TIMING")!=NULL;
+#ifndef __APPLE__
+    thp_initial=prctl(PR_GET_THP_DISABLE,0L,0L,0L,0L);
+#endif
+}
 static lean_object *record(char kind, lean_object *label, uint64_t value) {
     if (output) {
         if (used==CAPACITY || strlen(lean_string_cstr(label))>=sizeof(events[0].label)) {
@@ -77,6 +106,8 @@ static lean_object *record(char kind, lean_object *label, uint64_t value) {
 #endif
             if (memory_enabled && kind!='C' && strncmp(lean_string_cstr(label),"extension:",10)) memory_snapshot(e);
             strcpy(e->label,lean_string_cstr(label));
+            if (thp_enabled && kind!='C' && (!strcmp(e->label,"load") || !strcmp(e->label,"finalize") ||
+                !strcmp(e->label,"private_tables") || !strcmp(e->label,"initialize_extensions"))) thp_snapshot(e);
             if (kind=='E' && !strcmp(e->label,"finalize")) fault_regions_capture();
         }
     }
@@ -100,7 +131,12 @@ __attribute__((destructor)) static void report(void) {
     if (!output) return;
     FILE *f=fopen(output,"w");
     if (!f) return;
-    fprintf(f,"{\"pid\":%d,\"compression_supported\":%s,\"overflow_or_error\":%s,\"events\":[\n",getpid(),
+    int thp_final=-1;
+#ifndef __APPLE__
+    thp_final=prctl(PR_GET_THP_DISABLE,0L,0L,0L,0L);
+#endif
+    fprintf(f,"{\"thp_disable_initial\":%d,\"thp_disable_final\":%d,",thp_initial,thp_final);
+    fprintf(f,"\"pid\":%d,\"compression_supported\":%s,\"overflow_or_error\":%s,\"events\":[\n",getpid(),
 #ifdef __APPLE__
         "true",
 #else
@@ -110,6 +146,9 @@ __attribute__((destructor)) static void report(void) {
     for (size_t i=0;i<used;i++) {
         struct event *e=&events[i];
         fprintf(f,"{\"kind\":\"%c\",\"label\":",e->kind); quoted(f,e->label);
+        fprintf(f,",\"thp_valid\":%s,\"anon_huge_bytes\":%llu,\"anonymous_bytes\":%llu,\"census_ns\":%llu",
+                e->thp_valid ? "true" : "false",(unsigned long long)e->anon_huge_bytes,
+                (unsigned long long)e->anonymous_bytes,(unsigned long long)e->census_ns);
         fprintf(f,",\"trace_clock\":%llu,\"memory_valid\":%s,\"disk_read_bytes\":%llu,\"disk_write_bytes\":%llu,\"resident_bytes\":%llu,\"compressed_bytes\":%llu,\"decompressions\":%llu",
                 (unsigned long long)e->trace_clock,e->memory_valid ? "true" : "false",
                 (unsigned long long)e->disk_read,(unsigned long long)e->disk_write,(unsigned long long)e->resident,

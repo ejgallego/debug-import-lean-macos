@@ -1,0 +1,48 @@
+name: Real Lean process-only THP comparison
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiments/lean-thp]
+permissions:
+  contents: read
+jobs:
+  thp:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    env:
+      LEAN_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build and tracing tools
+        run: sudo apt-get update && sudo apt-get install -y clang libc++-18-dev linux-tools-common "linux-tools-$(uname -r)"
+      - uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: false
+      - name: Download pinned artifacts and source
+        run: |
+          lake exe cache get
+          git diff --exit-code -- lean-toolchain lake-manifest.json
+          mkdir -p results/source results/thp
+          curl -fsSL https://codeload.github.com/leanprover/lean4/tar.gz/58774429865502f05c63239266aac30ef1e91ef7 -o results/source.tar.gz
+          tar -xzf results/source.tar.gz -C results/source --strip-components=1
+      - name: Build instrumented Lean and address observer
+        run: |
+          python3 scripts/build-lean-inner.py --source results/source --output results/rebuild
+          cc -O2 -std=c11 -Wall -Wextra -Werror -shared -fPIC repro/lean-io-timing.c -ldl -o results/thp/lean-io-timing.so
+      - name: Compare process THP modes
+        run: lake env python3 scripts/run-lean-thp.py --build results/rebuild --output results/thp
+      - name: Validate fault address captures
+        run: python3 scripts/summarize-lean-faults.py results/thp --output results/thp/fault-summary.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lean-thp-linux-arm64
+          path: |
+            results/thp/
+            results/rebuild/build.json
+            results/rebuild/Environment.patch
+          retention-days: 30
