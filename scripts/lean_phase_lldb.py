@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import struct
 import time
-import traceback
 import lldb
 
 NAMES = ['open_count', 'open_ns', 'header_read_count', 'header_read_ns', 'header_read_bytes',
@@ -37,48 +36,6 @@ def save():
     output.write_text(json.dumps({'events': events, 'errors': errors}, indent=2)+'\n')
 
 
-def entered(frame, location, _dict):
-    start_callback = time.monotonic_ns()
-    try:
-        thread = frame.GetThread()
-        process = thread.GetProcess()
-        target = process.GetTarget()
-        phase = entries[location.GetBreakpoint().GetID()]
-        caller = thread.GetFrameAtIndex(1)
-        if not caller.IsValid() or caller.GetPC() == lldb.LLDB_INVALID_ADDRESS:
-            raise RuntimeError('cannot unwind phase return address')
-        bp = target.BreakpointCreateByAddress(caller.GetPC())
-        bp.SetThreadID(thread.GetThreadID())
-        bp.SetOneShot(True)
-        bp.SetScriptCallbackFunction(__name__+'.returned')
-        event = {'phase': phase, 'thread_id': thread.GetThreadID(), 'pid': process.GetProcessID(),
-                 'entry_ns': start_callback, 'entry_counters': counters(process),
-                 'return_address': caller.GetPC(), 'entry_pc': frame.GetPC()}
-        returns[bp.GetID()] = event
-        events.append(event)
-        save()
-        event['resume_ns'] = time.monotonic_ns()
-        event['entry_callback_ns'] = event['resume_ns']-start_callback
-        return False
-    except Exception:
-        errors.append(traceback.format_exc()); save(); return True
-
-
-def returned(frame, location, _dict):
-    start_callback = time.monotonic_ns()
-    try:
-        event = returns.pop(location.GetBreakpoint().GetID())
-        event['return_ns'] = start_callback
-        event['wall_seconds'] = (start_callback-event['resume_ns'])/1e9
-        event['return_counters'] = counters(frame.GetThread().GetProcess())
-        event['counter_delta'] = {k:event['return_counters'][k]-event['entry_counters'][k] for k in NAMES}
-        event['return_callback_ns'] = time.monotonic_ns()-start_callback
-        save()
-        return False
-    except Exception:
-        errors.append(traceback.format_exc()); save(); return True
-
-
 def run(debugger, spec_path):
     global output, entries, returns, events, errors, counter_address
     spec = json.loads(Path(spec_path).read_text())
@@ -93,7 +50,6 @@ def run(debugger, spec_path):
     for phase, symbol in [('load', 'l_Lean_importModulesCore'), ('finalize', 'l_Lean_finalizeImport')]:
         bp = target.BreakpointCreateByName(symbol)
         entries[bp.GetID()] = phase
-        bp.SetScriptCallbackFunction(__name__+'.entered')
     launch = lldb.SBLaunchInfo(spec['command'][1:])
     env = dict(os.environ)
     env.update(spec['environment'])
@@ -108,12 +64,52 @@ def run(debugger, spec_path):
     process = target.Launch(launch, error)
     if error.Fail():
         errors.append(f'launch failed: {error}')
-    elif process.GetState() != lldb.eStateExited:
-        errors.append(f'unexpected process stop: state={process.GetState()}, {process.GetSelectedThread().GetStopDescription(1024)}')
+    # Handle stops synchronously. Registering a new Python breakpoint callback
+    # inside another callback triggers an autogen-name KeyError in Apple's LLDB.
+    while not errors and process.GetState() == lldb.eStateStopped:
+        stopped_ns = time.monotonic_ns()
+        thread = next((t for t in process if t.GetStopReason() == lldb.eStopReasonBreakpoint), None)
+        if thread is None or thread.GetStopReasonDataCount() < 2:
+            errors.append('unexpected non-breakpoint stop: '+str(process.GetSelectedThread().GetStopDescription(1024)))
+            break
+        bp_id = thread.GetStopReasonDataAtIndex(0)
+        try:
+            if bp_id in entries:
+                caller = thread.GetFrameAtIndex(1)
+                if not caller.IsValid() or caller.GetPC() == lldb.LLDB_INVALID_ADDRESS:
+                    raise RuntimeError('cannot unwind phase return address')
+                bp = target.BreakpointCreateByAddress(caller.GetPC())
+                bp.SetThreadID(thread.GetThreadID())
+                event = {'phase': entries[bp_id], 'thread_id': thread.GetThreadID(),
+                         'pid': process.GetProcessID(), 'entry_ns': stopped_ns,
+                         'entry_counters': counters(process), 'return_address': caller.GetPC()}
+                returns[bp.GetID()] = event
+                events.append(event)
+                save()
+                event['resume_ns'] = time.monotonic_ns()
+                event['entry_handler_ns'] = event['resume_ns']-stopped_ns
+            elif bp_id in returns:
+                event = returns.pop(bp_id)
+                target.BreakpointDelete(bp_id)
+                event['return_ns'] = stopped_ns
+                event['wall_seconds'] = (stopped_ns-event['resume_ns'])/1e9
+                event['return_counters'] = counters(process)
+                event['counter_delta'] = {k:event['return_counters'][k]-event['entry_counters'][k] for k in NAMES}
+                event['return_handler_ns'] = time.monotonic_ns()-stopped_ns
+                save()
+            else:
+                raise RuntimeError(f'unexpected breakpoint {bp_id}')
+            resumed = process.Continue()
+            if resumed.Fail():
+                errors.append('continue failed: '+str(resumed))
+        except Exception as error:
+            errors.append(str(error))
+    if process.GetState() != lldb.eStateExited:
+        errors.append(f'process did not exit normally: state={process.GetState()}')
         process.Kill()
     completed = {'events': events, 'errors': errors, 'exit_code': process.GetExitStatus(),
                  'pid': process.GetProcessID(), 'debugger_wall_seconds': time.monotonic()-started,
-                 'note': 'Phase wall excludes entry callback body but includes debugger stop/resume transport; counters are sums of syscall elapsed times in the target. No ASLR disabling.'}
+                 'note': 'Phase wall excludes entry handler body but includes debugger stop/resume transport; counters are sums of syscall elapsed times in the target. No ASLR disabling.'}
     output.write_text(json.dumps(completed, indent=2)+'\n')
     valid = not errors and completed['exit_code'] == 0 and not returns
     valid &= sorted(e['phase'] for e in events) == ['finalize', 'load']
