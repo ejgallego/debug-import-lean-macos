@@ -2,9 +2,10 @@
 
 `mmap-replay.c` is a standalone starting point for reproducing the VM behavior.
 It requires a C compiler and Lean artifact files, but does not link or run Lean.
-CI has exercised it on Linux and Intel/ARM macOS. It exposes expensive hinted
-mapping on Intel and working-set thrashing on the small ARM runner; connecting
-those effects to the original Lean issue still needs investigation. See
+CI has exercised it on Linux and Intel/ARM macOS. Descending creation order makes
+mapping setup about 8x/9.3x faster on Intel/ARM with actual Lean artifacts. Full
+page sweeps also expose working-set thrashing on the small ARM runner; connecting
+these effects to the original warm-page issue still needs investigation. See
 [FINDINGS.md](FINDINGS.md) for the evidence and its limits.
 
 The next reduction, `mmap-hints.c`, runs without any Lean files:

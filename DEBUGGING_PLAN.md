@@ -270,12 +270,32 @@ macOS/Linux ratio.
 
 ## Recommended next implementation
 
-Start with a small native residency/access probe implementing the unchanged-map,
-remap, and fresh-process experiments above, using real Lean artifact files.
-Use an existing reproducing Mac for the decisive measurements; this workspace is
-Linux. Reuse the existing benchmark for end-to-end comparison. Defer reporting,
-packaging, and broad CI improvements. The initial C replay and Linux strace
-extractor are implemented and exercised locally, including fallback and private
-write checks. Next run the recorded sequence on macOS, profile any reproduced
-slow phase, and reduce it. See `repro/README.md` for commands and fidelity limits.
-No Lean source changes or new CI runs have been made.
+The C artifact replay and a standalone mapping-order reduction have now run on
+GitHub's Linux, Intel macOS, and ARM macOS runners. The small program exhibits a
+large macOS insertion-order penalty without page access. See `repro/FINDINGS.md`
+for run links, measurements, the candidate XNU mechanism, and the ARM memory
+capacity confound. No Lean source changes have been made.
+
+Reconnect that reduction to Lean in stages:
+
+1. Compare captured versus descending saved-address creation order using all
+   actual artifacts and Lean's mapping/fallback policy. Omit synthetic page
+   passes initially; retain rejected-mapping counts and fallback bytes. This is
+   implemented as `--suite order`; CI shows about 8x/9.3x faster mapping setup
+   on Intel/ARM macOS and little change on Linux. See the findings for fallback
+   differences and timing limits.
+2. Capture an actual macOS Lean loader trace, recording each artifact's requested
+   and returned address, mapping lifetime, and relocation decision. Compare it
+   with the Linux-derived sequence; surrounding anonymous mappings and allocator
+   activity may change address collisions and VM bookkeeping. Keep trace overhead
+   out of baseline timings.
+3. Add observed interleaving to C: accesses between mappings, private writes from
+   relocation, and measured anonymous-memory pressure. A syscall trace does not
+   reveal ordinary memory reads/writes; those require separate instrumentation
+   or access/fault sampling. Model only evidence-supported behavior and check
+   that each addition moves the same cost bucket as Lean.
+
+The descending-order experiment is a diagnostic intervention in the C replay.
+Applying it to Lean requires preserving dependency and relocation semantics.
+Keep the mapping-setup bottleneck distinct from repeated warm-page faults until
+the measurements connect them. Defer packaging while resolving these questions.

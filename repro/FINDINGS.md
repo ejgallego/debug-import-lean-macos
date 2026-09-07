@@ -144,6 +144,57 @@ operations, sizes, requested addresses, protections, and platform flags. It omit
 synthetic page passes to avoid the small ARM runner's working-set confound.
 Linux locally passes both orders with no fallback; permutation validation,
 checksum preservation with page passes enabled, and address-collision fallback
-have also been checked. macOS results will determine whether the small reduction
-predicts the real-artifact mapping cost. Neither order yet models Lean's
-interleaved pointer accesses, relocation writes, or heap activity.
+have also been checked. Neither order yet models Lean's interleaved pointer
+accesses, relocation writes, or heap activity.
+
+## Reconnecting the reduction to real Lean artifacts
+
+[Artifact-order CI run 34119198396](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34119198396)
+completed successfully on all three hosts at source `23b554e1573b8dfbcc4797aac97a11b8334b3762`.
+Lean and Mathlib remain pinned to `58774429865502f05c63239266aac30ef1e91ef7`
+and `9d1a52c11563a55a41e0fb61ed0865b384bfdb6d`. Every case requests 37,687
+artifact mappings totaling 7,303,535,912 file bytes. The inventory, descending
+permutation, source hash, process exits, and absence of page-pass records were
+checked in the downloaded artifacts. A separate local Linux syscall comparison
+confirmed that captured-order C requests match Lean's entire artifact mmap
+sequence, and descending order preserves the multiset of requests.
+
+Median mapping-setup seconds across two fresh processes per order, each with two
+map/unmap cycles (four observations, not four independent processes):
+
+| Host | Captured order | Descending saved-address order | Ratio |
+|---|---:|---:|---:|
+| Linux | 0.169 | 0.164 | 1.04x |
+| Intel macOS | 8.494 | 1.068 | 7.95x |
+| ARM macOS | 6.582 | 0.705 | 9.34x |
+
+Each host first runs a real Lean import. C process order is captured/descending,
+then descending/captured. Headers are read once before the timed processes to
+prepare the permutation. The measured map phase includes open, stat, header read,
+mmap, rejected-address cleanup, copy fallback, and close; it is not isolated
+mmap syscall time. All mapping phases report zero major faults. This does not
+establish an absence of filesystem I/O or all page faults, especially on macOS.
+
+Intel has exactly six rejected-address fallbacks and 1,247,544 fallback bytes in
+every cycle of both orders. ARM has 122 fallbacks and 30,735,064 bytes in captured
+order; descending has 122 or 125 fallbacks and 30,735,064 or 30,959,608 bytes.
+Linux has none. Thus requests are identical, but accepted mappings are not
+guaranteed identical, particularly on ARM. Per-file outcomes are not yet logged.
+Even the ARM descending process with matching aggregate fallback counts takes
+only 0.659/0.724 s per map phase. The slight fallback variation does not accompany
+the disappearance of the order penalty.
+
+The Intel map-phase median system CPU falls from 8.401 to 1.007 s; ARM falls from
+5.370 to 0.639 s. Individual captured-order map times range from 7.775–10.781 s on
+Intel and 4.941–8.652 s on ARM, so the small sample supports a large directional
+effect rather than a precise speedup estimate. Lean reference process wall times
+are 3.070/27.571/40.063 s on Linux/Intel/ARM. Those are single reference runs,
+not baseline/candidate Lean measurements; the C ratios are not Lean speedups.
+
+The small reduction now predicts a substantial mapping-setup penalty with Lean's
+real artifact requests. It strengthens the insertion-order diagnosis and the
+candidate XNU hole-search explanation. It still does not directly identify the
+running kernel's internal path, reproduce Lean's complete access trace, or
+establish the cause of the original warm-page reclamation behavior. Next capture
+actual macOS loader outcomes and access/relocation interleaving before extending
+the C model. A descending-order Lean loader is not yet implemented or validated.
