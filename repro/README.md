@@ -354,3 +354,10 @@ Build commands, source patch, generated C, archive/binary hashes, machine detail
 raw snapshots, and whole-process `wait4` measurements are retained. Changes in
 linkage, compiler code shape, and allocation remain possible confounders; compare
 the relinked and stock controls before treating phase timings as representative.
+
+The outer `finalize` span includes caller-side release of the temporary
+`ImportState` after `finalizeImport` returns. This differs from the older LLDB
+function-return boundary. Its exclusive metrics expose work outside the named
+stages; they must remain unassigned until the generated-C release and other
+boundary gaps are timed directly. Whole-process faults outside the two outer
+spans are likewise retained rather than attributed to imported data.

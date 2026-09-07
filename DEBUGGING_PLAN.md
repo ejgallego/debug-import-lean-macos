@@ -349,3 +349,26 @@ with the stock executable on the same host. Measure user/kernel CPU and faults
 at those boundaries, and use controlled memory pressure before attributing warm
 page-ins to aggressive eviction. The mapping-order C reduction remains useful,
 but its timings cannot substitute for the real import's finalization work.
+
+### Internal finalization update
+
+Run `34138341689` removes LLDB from phase diagnostics by relinking the pinned
+Lean frontend with an instrumented `Lean.Environment` and the release archives.
+All 32 imports/capture validations pass. Warm stock, relinked control and timed
+runs are compared in balanced order; Linux medians differ by about 2%, while
+Mac remains variable. See the findings and reproducible build commands.
+
+The Mac median outer finalization interval is 6.007 s versus 2.162 s on ARM Linux.
+Private-table construction takes 1.345/0.444 s; first persistent marking
+1.020/0.388 s; extension initialization 2.101/0.833 s. Four extensions—parser,
+simplifier, regular initializers and typeclass instances—account for about 82%
+of Mac extension initialization. The slowest Mac finalization is 8.525 s with
+8.405 s CPU and only eight major faults. Thus warm variability is not confined
+to mapping setup or major-page-in waits.
+
+Next instrument the generated caller's `lean_dec_ref` of `ImportState`: the new
+outer finalization interval includes that release, and 0.061–0.475 s on Mac
+remains outside named stages (versus about 9 ms on Linux). It is a concrete
+candidate for the residual, not yet measured separately. Then obtain focused
+native profiles for parser reconstruction and private-table construction with
+same-host controls, before changing algorithms or extending the C replay.

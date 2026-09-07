@@ -546,3 +546,185 @@ and warm repetitions separate and record host memory pressure. A controlled
 intervening-memory workload is still needed to establish cache loss causally.
 Continue using C to isolate the mapping-order mechanism, while grounding the
 remaining work in these real Lean phases.
+
+## Finalization substeps and named extensions, without LLDB
+
+Successful CI run [34138341689](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34138341689),
+source `8997871110f6bfa4f3d90175ee8bdc64125b01e0`, measures real Lean imports on
+ARM macOS and ARM Linux with internal wall/CPU/fault snapshots. Both jobs pass,
+as do all 32 process/capture validations. The artifacts are
+`lean-inner-{macos-arm64,linux-arm64}`; local copies are in
+`results/ci-34138341689/`, with raw measurements under each artifact's `inner/`
+and source patch/generated C under `rebuild/`.
+
+The first attempt, run `34137725745` at `b7552e8`, completed all Linux checks but
+failed to compile the Mac logger: `_POSIX_C_SOURCE` hides Darwin's additional
+`rusage` fields. Defining `_DARWIN_C_SOURCE` fixes that portability issue; no
+Mac timing from the failed build is used. An earlier local link smoke also
+caught a missing `LEAN_EXPORTING` flag, which hid Environment symbols needed by
+the interpreter. The committed builder sets it, and real Mathlib imports pass.
+
+### Method and representativeness
+
+This uses the same pinned module-system Mathlib consumer, Lean commit
+`58774429865502f05c63239266aac30ef1e91ef7`, Mathlib commit
+`9d1a52c11563a55a41e0fb61ed0865b384bfdb6d`, `LEAN_NUM_THREADS=1`, and enabled
+ASLR. `Lean.Environment` is rebuilt from the pinned source and linked with the
+release archives and pinned C++ shell. The installed artifact files are reused
+unchanged. The suite compares the stock release, an uninstrumented relinked
+control, and an instrumented relink; it does not substitute a custom import
+algorithm or C replay for Lean's frontend.
+
+The instrumented runs use neither LLDB nor the I/O preload library. A bounded
+in-process logger buffers monotonic clock and `getrusage(RUSAGE_SELF)` snapshots
+until exit. Nested spans have inclusive and exclusive metrics. The summary
+checks complete nesting and stage coverage, workload cardinalities, and that
+phase CPU/elapsed totals fit within the direct process's `wait4` measurements.
+A logging-disabled diagnostic binary is also timed. Separate I/O diagnostics
+check artifact calls for all three executable variants.
+
+The Mac runner is Apple M1 (Virtual), macOS 15.7.9, 7 GiB RAM, 16 KiB pages.
+ARM Linux is Neoverse-N2, Ubuntu 24.04, kernel 6.17.0-1022-azure, about 15.6 GiB
+RAM, 4 KiB pages. Neither hardware nor RAM is matched; ratios describe these
+hosts and cannot be assigned to the OS alone.
+
+| Whole import | ARM Linux median s (range) | ARM macOS median s (range) |
+|---|---:|---:|
+| Stock, three warm controls | 3.035 (3.005–3.054) | 15.005 (12.222–17.477) |
+| Uninstrumented relink, three warm controls | 3.098 (3.044–3.144) | 14.015 (13.387–17.203) |
+| Instrumented relink, three warm diagnostics | 3.082 (3.034–3.200) | 13.187 (11.906–19.416) |
+| Instrumented binary with logging disabled, one run | 3.153 | 12.796 |
+
+The three main variants are order-balanced across warm passes. Linux medians
+are within about 2.1%; Mac ranges overlap but are much wider. These controls
+support using the diagnostic for attribution, not claiming an improvement or a
+precisely calibrated logging overhead. Stock's initial import is 47.300 s on Mac
+with 118,962 major faults, versus 3.232 s / zero on Linux. Initial cache state
+is not controlled, and subsequent variant-initial runs are retained separately.
+
+### What finalization does, and its measured costs
+
+All numbers below are medians of three warm instrumented runs, in seconds.
+Rows are independently aggregated, so the medians need not sum exactly.
+
+| Stage | ARM Linux | ARM macOS | Work performed |
+|---|---:|---:|---|
+| Prepare modules | 0.031 | 0.209 | Select module/IR data and count incoming constants |
+| Private tables | 0.444 | 1.345 | Allocate the three hash tables; populate private constants and name-to-module index; resolve duplicate declarations |
+| Public table | 0.176 | 0.267 | Populate the exported constant view |
+| Initial extension states | 0.001 | 0.003 | Create initial state slots |
+| Assemble environment base | 0.006 | 0.007 | Build environment headers and region lists |
+| Imported entries | 0.126 | 0.362 | Arrange extension entries by module for private, IR and server views |
+| Persistent marking before extensions | 0.388 | 1.020 | Traverse the existing environment graph and mark new reachable objects persistent |
+| Initialize extensions | 0.833 | 2.101 | Invoke each extension's import callback, install its state, run initializers and update registries |
+| Persistent marking after extensions | 0.148 | 0.294 | Mark newly constructed extension state reachable from the environment |
+| Outside the named stages | 0.009 | 0.416 | Residual includes final wrapping and caller-side temporary-state release; not individually attributed |
+| **Outer finalization interval** | **2.162** | **6.007** | Includes the stages and their residual |
+
+Every diagnostic processes 10,690 modules, 643,468 incoming private constant
+entries, 643,468 incoming public constant entries, and 544,977 extra IR constant
+names. These are input counts, not unique-key counts or proof that the two
+constant maps have identical contents. The initial registry has 224 environment
+extensions, and 339 named persistent extensions are visited as imported
+initializers register further extensions.
+
+The implementation is in the pinned
+[`Lean.Environment.finalizeImport`](https://github.com/leanprover/lean4/blob/58774429865502f05c63239266aac30ef1e91ef7/src/Lean/Environment.lean#L2308).
+Private-table construction walks constant names and information, populates hash
+maps, and checks whether repeated declarations subsume each other. The imported
+entries stage builds per-extension arrays indexed by module before callbacks
+consume them. Thus finalization rebuilds process-local indices over imported
+objects, even when the underlying files are already cached.
+
+[`lean_mark_persistent`](https://github.com/leanprover/lean4/blob/58774429865502f05c63239266aac30ef1e91ef7/src/runtime/object.cpp#L567)
+uses an explicit work list, changes reference-counted objects to persistent,
+and traverses their pointer fields. Scalars and already persistent objects
+stop traversal. The first pass prevents costly subsequent shared/MT marking
+when callbacks put the environment in references; the second covers new
+extension state. The measured first marking pass is much more expensive than
+the second on both hosts. This graph traversal is absent from the mmap-only C
+reproducer.
+
+### Which extension callbacks dominate
+
+These are inclusive named-extension spans, contained inside `initialize_extensions`.
+They include import callbacks, state installation and registry/attribute updates.
+
+| Extension | ARM Linux s | ARM macOS s | Mac/Linux host ratio |
+|---|---:|---:|---:|
+| Parser | 0.127 | 0.588 | 4.6x |
+| Simplifier | 0.307 | 0.542 | 1.8x |
+| Regular initialization attributes | 0.112 | 0.434 | 3.9x |
+| Typeclass instances | 0.079 | 0.158 | 2.0x |
+
+Together these four spans account for 81.4–82.1% of Mac extension initialization
+and 74.6–75.5% on Linux. Their differing ratios argue against applying a single
+blanket multiplier to finalization.
+
+- [Parser imports](https://github.com/leanprover/lean4/blob/58774429865502f05c63239266aac30ef1e91ef7/src/Lean/Parser/Extension.lean#L337)
+  convert serialized entries to parser functions and rebuild category/token
+  state. Parser descriptions are recursively compiled, and parser constants may
+  be evaluated. Median Mac parser time includes 0.395 s user and 0.165 s kernel
+  CPU, versus 0.126 s user and 0.001 s kernel on Linux.
+- [Simplifier imports](https://github.com/leanprover/lean4/blob/58774429865502f05c63239266aac30ef1e91ef7/src/Lean/Meta/Tactic/Simp/SimpTheorems.lean#L732)
+  replay imported simp entries into theorem lookup structures, including
+  discrimination trees and lemma-name sets. Typeclass imports likewise rebuild
+  [an instance discrimination tree and name map](https://github.com/leanprover/lean4/blob/58774429865502f05c63239266aac30ef1e91ef7/src/Lean/Meta/Instances.lean#L80).
+  Their shared [scoped-extension importer](https://github.com/leanprover/lean4/blob/58774429865502f05c63239266aac30ef1e91ef7/src/Lean/ScopedEnvExtension.lean#L61)
+  iterates imported entries and calls `addEntry` for global entries.
+- The regular-initializer extension runs
+  [module `[init]` attributes](https://github.com/leanprover/lean4/blob/58774429865502f05c63239266aac30ef1e91ef7/src/Lean/Compiler/InitAttr.lean#L198).
+  Its nested `run_init_attributes` span is 0.397 s on Mac versus 0.089 s on Linux.
+  That time is already included in the regular-initializer row above.
+
+### CPU, faults, variation, and remaining uncertainty
+
+| Mac diagnostic | Load s | Finalization s | Finalization CPU s | Finalization major faults | Unassigned finalization s |
+|---|---:|---:|---:|---:|---:|
+| inner-1 | 6.436 | 6.007 | 5.736 | 190 | 0.475 |
+| inner-2 | 10.520 | 8.525 | 8.405 | 8 | 0.416 |
+| inner-3 | 6.756 | 4.549 | 4.520 | 189 | 0.061 |
+
+Linux finalization spans are 2.120, 2.162 and 2.272 s, with zero major faults
+and almost equal CPU/elapsed totals. Mac's slowest finalization is also almost
+entirely CPU time and has the fewest major faults. Multiple stages, including
+private tables and persistent marking, slow together. This batch therefore
+localizes a substantial warm CPU cost and variability beyond mmap; major
+page-ins cannot explain that slow warm diagnostic. CPU time includes memory
+stalls while executing and does not establish which hardware/runtime mechanism
+causes the host difference.
+
+Whole-process faults need care: in the three Mac diagnostics, 2,832, 372 and
+2,831 major faults occur outside the load/finalization intervals. Those may
+include native image/startup activity and are not finalization faults. The
+relinked binaries change native layout and show different whole-process fault
+counts from stock. The phase data prevent charging all those faults to mapped
+Mathlib declarations. Earlier LLDB and current internal measurements also use
+different hosts/runs and slightly different boundaries, so their difference is
+not a measured debugger penalty.
+
+Specifically, the new outer `finalize` timer brackets the call from
+`importModules`, and therefore includes caller-side release of its `ImportState`.
+The older LLDB function-entry/return timer excludes that release. The generated
+C artifact (`rebuild/instrumented.c`) shows `lean_dec_ref` on the import-state
+argument immediately after `l_Lean_finalizeImport` returns and before the end
+marker. The unassigned Mac interval is largely user CPU (0.060–0.418 s). This
+makes temporary-state destruction a concrete next hypothesis, not an established
+attribution: directly bracket that decrement and distinguish it from other gaps
+between source markers. Linux's unassigned interval is only 8.6–9.1 ms.
+
+The separate I/O checks still see all 37,687 opens, stats, 88-byte reads, mappings
+and closes, with 7,303,535,912 requested mapping bytes. Mac stock/control have
+122 fallback mappings / 30,735,064 copied bytes; the instrumented I/O run has
+125 / 30,959,608. Linux has zero fallbacks. Actual mmap calls take 7.434, 7.455
+and 5.285 s in the Mac stock/control/instrumented I/O runs, versus 0.083–0.087 s
+on Linux. These are separate processes; do not subtract their mmap timings from
+the internally timed load spans.
+
+Next isolate import-state release in the generated C, then sample the parser
+callback and private-table construction on the same runner with adjacent
+uninstrumented controls. Controlled memory-pressure and per-page evidence remain
+necessary before assigning warm cache loss to an aggressive reclamation policy.
+The current data identify the real runtime work a more faithful C reduction
+would need: constant-name indexing, pointer-rich extension indices, graph
+traversal, and temporary-state destruction, in addition to mapping setup.
