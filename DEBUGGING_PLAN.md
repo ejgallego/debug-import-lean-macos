@@ -372,3 +372,25 @@ remains outside named stages (versus about 9 ms on Linux). It is a concrete
 candidate for the residual, not yet measured separately. Then obtain focused
 native profiles for parser reconstruction and private-table construction with
 same-host controls, before changing algorithms or extending the C replay.
+
+### Fault-address update
+
+Runs `34146262753` (Mac) and `34155839886` (corrected Linux clock) now capture
+actual target fault addresses and per-phase disk bytes. Mac additionally exposes
+VM fault types and task decompressions. All four load/finalize trace counts
+reconcile exactly with their target counters. See `repro/FINDINGS.md` for raw
+run provenance, phase tables and explicit capture limits.
+
+Private-table faults predominantly hit artifacts; Mac extension initialization
+instead has about 90,000 zero-fill faults. Their handler durations are small
+compared with the extension phase. An untraced Mac finalization still takes
+6.534 s / 6.498 s CPU while reading 316 KiB and performing one decompression.
+There is a substantial warm CPU cost beyond storage, compression and mapping
+setup. Tracing adds memory pressure, so use the untraced measurements for timing.
+
+The next causal fault experiment is a process-scoped Linux THP-disable control
+with per-task huge-page and allocator commit/purge evidence. Host THP allocations
+rise during each import, but that does not yet attribute the reduction in Linux
+fault counts. On Mac, capture allocator mapping lifetimes to distinguish fresh
+allocation from reuse after purge. Preserve the private-table/parser profiling
+and generated-C `ImportState` release experiments for the remaining CPU cost.

@@ -728,3 +728,151 @@ necessary before assigning warm cache loss to an aggressive reclamation policy.
 The current data identify the real runtime work a more faithful C reduction
 would need: constant-name indexing, pointer-rich extension indices, graph
 traversal, and temporary-state destruction, in addition to mapping setup.
+
+## Address-level faults and task I/O (September 7, 2026)
+
+Real Lean now has fault addresses, kernel event types on macOS, and per-phase
+bytes read from disk and task decompressions. This separates three mechanisms
+that aggregate fault counts conflated: first access to file-backed data,
+zero-fill allocation, and retrieving compressed anonymous pages. It does **not**
+yet explain the remaining CPU cost or establish an aggressive eviction policy.
+
+The macOS and initial Linux experiment is
+[run 34146262753](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34146262753),
+source `932c9f1`. The corrected Linux address/phase experiment is
+[run 34155839886](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34155839886),
+source `7d0afeb`. Same pinned Lean, Mathlib, module consumer and one Lean thread
+as the previous experiment. Mac is M1 / 7 GiB / 16 KiB pages; Linux is
+Neoverse-N2 / approximately 15.6 GiB / 4 KiB pages. These remain different
+hardware and memory configurations, not a controlled pure-OS comparison.
+Raw local downloads are `results/ci-34146262753/{macos,linux}/` and
+`results/ci-34155839886/linux/`; artifacts retain rebuild hashes and commands.
+
+### Capture and validation
+
+- macOS `ktrace trace -t -N -p lean -f S0x0130` supplies VM-fault entry/return
+  events, address and outcome. The tracer runs separately; Lean runs as the
+  ordinary runner user. We decode only the PID recorded by the target logger.
+- Linux `perf record --clockid mono -e minor-faults,major-faults -c 1 -d`
+  captures every requested fault event, including its address. The first Linux
+  run omitted the explicit clock: **do not use that run for fault-to-phase
+  attribution**. Its timing/I/O snapshots remain useful. The corrected run
+  explicitly matches `CLOCK_MONOTONIC` and validates against phase counters.
+- All four accepted traces have no reported lost events or unmatched pairs.
+  Each trace's load/finalize event counts match its target `getrusage` total
+  exactly. All Linux inner stages match exactly; the Mac final marking stage
+  differs by one event at the snapshot boundary. Mac traces contain 290,368
+  and 286,726 target faults; corrected Linux traces contain 96,968 and 95,165.
+- Each traced process still opens/stats/header-reads/maps/closes 37,687 artifacts,
+  requesting 7,303,535,912 mapping bytes. Accepted artifact ranges are recorded
+  by the existing passive interposer. Mac fallback counts are 122/125; Linux 0.
+- Other address classes use an endpoint mapping census and native image ranges.
+  This is **not a mapping-lifetime trace**: temporary allocations may already
+  have disappeared. Mac leaves 54,169/78,480 addresses unclassified, mostly
+  zero-fill faults during extension initialization. Their kernel fault types
+  are known even when their endpoint mapping is absent.
+- A separate `artifact-range-before-mmap-return` category retains faults that
+  match a subsequently accepted artifact mapping but precede its recorded
+  completion time. On Mac these are within about 6 microseconds of completion;
+  clock-pair skew and faults inside mmap cannot be distinguished here. Do not
+  silently relabel these as unrelated file mappings. This ambiguity does not
+  affect the private-table or extension findings below.
+
+The original probe run `34145095798` established that macOS tracing works on
+this CI runner, which reports **SIP disabled**. This does not establish tracing
+availability on a normally configured managed Mac. Its Linux artifact upload failed because `perf.data` was root-owned;
+subsequent runs fix readability and preserve both platforms' probe evidence.
+
+### Untraced I/O and compression
+
+Per-phase macOS disk bytes are `proc_pid_rusage(..., RUSAGE_INFO_V4)`
+`ri_diskio_bytesread`; compression snapshots use `TASK_VM_INFO`, including the
+**target task's** cumulative decompression count. Linux reads `/proc/self/io`
+`read_bytes`. Unsupported Linux compression fields are explicitly marked as
+unsupported, not interpreted as measured zeros. Memory snapshots are enabled
+only at coarse phase boundaries, not at every named extension. The phase
+snapshots themselves use no tracer or preload library.
+
+| Platform / run | Load s | Load disk MiB | Finalize s | Finalize CPU s | Finalize disk MiB | Task decompressions in finalize |
+|---|---:|---:|---:|---:|---:|---:|
+| Mac first measured | 26.819 | 579.305 | 42.433 | 16.704 | 1790.406 | 9,894 |
+| Mac repeat 1 | 13.579 | 71.957 | 9.126 | 8.721 | 0.516 | 3,766 |
+| Mac repeat 2 | 10.732 | 70.008 | 10.104 | 9.563 | 0.219 | 6,973 |
+| Mac repeat 3 | 11.509 | 67.992 | 6.534 | 6.498 | 0.309 | 1 |
+| Linux repeat 1 | 0.732 | 0 | 2.202 | 2.201 | 0 | unavailable |
+| Linux repeat 2 | 0.755 | 0 | 2.114 | 2.114 | 0 | unavailable |
+| Linux repeat 3 | 0.743 | 0 | 2.083 | 2.082 | 0 | unavailable |
+
+The Mac first measured import has substantially more actual disk activity and
+non-CPU elapsed time than repeats. This is stronger evidence than a major-fault
+count, but its cache state was not controlled. All measured Linux load/finalize
+spans, including its first run, report zero disk-read bytes.
+
+Warm Mac finalization can still take **6.534 s with 6.498 s CPU, 316 KiB read
+and one decompression**. Storage/decompression therefore cannot account for the
+whole warm gap. Conversely, warm Mac loading has zero reported major faults yet
+68–72 MiB charged disk reads. Disk-byte accounting also includes explicit reads
+and other charged I/O; it is not a measurement of artifact mmap reads alone.
+There is no valid conversion from the fault counter to physical bytes read.
+
+### What the addresses and fault types show
+
+| Phase / evidence | Mac trace 1 | Mac trace 2 | Linux trace 1 | Linux trace 2 |
+|---|---:|---:|---:|---:|
+| Private tables: artifact-address faults | 75,533 | 75,532 | 13,735 | 13,735 |
+| Private tables: all faults | 81,390 | 81,077 | 13,832 | 13,832 |
+| Extension initialization: zero-fill faults | 90,392 | 90,383 | type unavailable | type unavailable |
+| Extension initialization: artifact-address faults | 7,296 | 7,296 | 1,465 | 1,465 |
+| Extension initialization: all faults | 99,274 | 98,873 | 5,680 | 3,914 |
+
+Private-table construction is primarily faulting on imported artifacts.
+Extension initialization's huge Mac count is primarily **zero-fill**, not
+rereading artifact pages. The Mac extension zero-fill handlers total only
+0.160/0.236 s entry-to-return elapsed time, out of 2.106/2.278 s for that phase.
+The finalization compressor handlers total 0.108/0.071 s. These durations include
+preemption and are not CPU cycles or an estimate of time an optimization would
+save. However, they show that a dramatic event count does not imply a dramatic
+fault-handler contribution in these captures.
+
+All traced finalization VM-fault handlers total 4.709/1.126 s, versus phase times
+11.606/7.945 s. File-page-in events account for 3.940/0.442 s of those totals.
+Their variation accompanies 171.098/25.098 MiB charged reads. Even the lighter
+trace leaves most finalization time outside fault handlers. Meanwhile actual
+artifact mmap calls still take 11.683/10.185 s on Mac, versus 0.112/0.107 s on
+Linux, in these same traced processes.
+
+**Tracing perturbs this memory-constrained workload.** Mac traced finalization
+reads 25–171 MiB versus 0.2–0.5 MiB in adjacent untraced repeats. The 128 MiB
+kernel trace buffer and tracing process compete for RAM. Plain relinked imports
+also vary considerably (31.635/26.674 s versus 18.344–22.979 s for memory-enabled
+repeats); this batch cannot estimate a clean instrumentation overhead percentage.
+Use untraced runs for timing claims and traces for the observed mechanism mix;
+do not transplant traced fault proportions onto untraced timings.
+
+### Why the counter ratios still need care, and the next experiment
+
+[XNU's resource accounting](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/kern_resource.c)
+reports task faults minus page-ins as minor faults and task page-ins as major
+faults. Its [VM fault path](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/vm/vm_fault.c)
+can count a first mapping of a prefetched clustered page as a page-in even on a
+cache hit. Linux [getrusage](https://man7.org/linux/man-pages/man2/getrusage.2.html)
+distinguishes faults by whether servicing them required I/O. The counts are
+useful within each platform, but are not interchangeable units across platforms.
+
+Linux's [fault-around implementation](https://github.com/torvalds/linux/blob/v6.17/mm/memory.c)
+can establish nearby file-page mappings on one fault. Its
+[transparent huge pages](https://www.kernel.org/doc/html/latest/admin-guide/mm/transhuge.html)
+can likewise satisfy a larger anonymous range with one allocation fault. The
+Linux host's `thp_fault_alloc` rises by exactly 202 in each untraced repeat here
+(195/199 in the corrected traces). That is host evidence, not yet a per-Lean
+measurement or a causal explanation. Allocator reuse/purge differences are
+another candidate; the pinned Lean source selects mimalloc v3.4.4.
+
+Next compare Linux default versus **process-only THP disabled**, preserving
+identical Lean artifacts and phase markers, and capture the target's anonymous
+huge-page usage plus allocator reserve/commit/purge activity. On Mac, trace those
+allocator operations and temporary allocation lifetimes to explain the zero-fill
+volume. In parallel as a research direction, sample the remaining CPU-heavy
+private-table/parser work and isolate `ImportState` release. Keep the already
+established mmap address-order problem separate: these fault results do not
+explain away its mapping-setup cost.

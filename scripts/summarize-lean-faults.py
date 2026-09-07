@@ -47,16 +47,22 @@ def classifier(out,name,page_size):
     native=Ranges(native);other=Ranges(other)
     def classify(addr,monotonic_ns):
         r=artifact.find(addr)
-        if r and monotonic_ns>=r[2]:return 'artifact'
+        if r:
+            return 'artifact' if monotonic_ns>=r[2] else 'artifact-range-before-mmap-return'
         r=native.find(addr) or other.find(addr)
         return r[2] if r else 'unclassified'
     return classify,len(maps['maps'])
 
 
+def read_lines(path):
+    with path.open() as f:
+        yield from f
+
+
 def mac_faults(path,pid):
     pending={};faults=[];errors=Counter();other_pids=Counter()
     pattern=re.compile(r'^\s*(\d+)\s+[\d.]+(?:\([^)]*\))?\s+(130000[9a])\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)\s+\S+\s+.*\((\d+)\)\s*$')
-    for line in path.open():
+    for line in read_lines(path):
         if 'lost' in line.lower() or 'dropped' in line.lower():errors['loss_messages']+=1
         m=pattern.match(line)
         if not m:
@@ -80,7 +86,7 @@ def mac_faults(path,pid):
 def linux_faults(path,pid):
     faults=[];errors=Counter();other=Counter()
     pattern=re.compile(r'^\s*\S+\s+(\d+)/(\d+)\s+(\d+)\.(\d+):\s+(minor-faults|major-faults):\s+([0-9a-f]+)')
-    for line in path.open():
+    for line in read_lines(path):
         if 'LOST' in line:errors['loss_messages']+=1
         m=pattern.match(line)
         if not m:
@@ -136,12 +142,17 @@ def summarize(out):
                 category=classify(addr,monotonic(start))
                 key=(phase,category,kind);b=buckets[key];b['count']+=1;b['fault_elapsed_ns']+=(end-start)*scale
                 page_sets[(phase,category)].add(addr//meta['page_size'])
-            record['trace']={'faults':len(faults),'capture_errors':errors,'other_pids':other,'artifact_mappings':n,'clock_scale':scale,
+            count_checks=[]
+            for b,e in top_spans+stage_spans:
+                observed=sum(b['trace_clock']<=start<e['trace_clock'] for start,end,addr,kind in faults)
+                expected=e['minor_faults']+e['major_faults']-b['minor_faults']-b['major_faults']
+                count_checks.append({'phase':b['label'],'trace':observed,'getrusage':expected,'difference':observed-expected})
+            record['trace']={'phase_count_checks':count_checks,'faults':len(faults),'capture_errors':errors,'other_pids':other,'artifact_mappings':n,'clock_scale':scale,
                 'buckets':[dict(phase=k[0],category=k[1],fault_type=k[2],**v) for k,v in sorted(buckets.items())],
                 'distinct_virtual_pages':[dict(phase=k[0],category=k[1],pages=len(v)) for k,v in sorted(page_sets.items())],
-                'classification':'Artifact mmap results with creation timestamps; other categories use endpoint maps, not complete mapping lifetimes.',
+                'classification':'Accepted artifact mmap ranges: events preceding the recorded mmap return have a separate boundary category (clock-pair uncertainty or in-call faults). Other categories use endpoint maps, not complete mapping lifetimes.',
                 'duration':'macOS fault entry-to-return elapsed time, including preemption; Linux duration unavailable.'}
-            if any(errors.values()):record['trace']['incomplete']=True
+            if any(errors.values()) or any(abs(c['difference'])>16 for c in count_checks):record['trace']['incomplete']=True
         report['runs'].append(record)
     return report
 
@@ -151,3 +162,4 @@ if __name__=='__main__':
     result=summarize(a.directory);text=json.dumps(result,indent=2)+'\n'
     if a.output:a.output.write_text(text)
     else:print(text,end='')
+    if any(r.get('trace',{}).get('incomplete') for r in result['runs']):raise SystemExit('incomplete trace: inspect capture errors and phase count checks')

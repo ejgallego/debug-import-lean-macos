@@ -361,3 +361,44 @@ function-return boundary. Its exclusive metrics expose work outside the named
 stages; they must remain unassigned until the generated-C release and other
 boundary gaps are timed directly. Whole-process faults outside the two outer
 spans are likewise retained rather than attributed to imported data.
+
+## Real Lean fault addresses and memory activity
+
+`lean-fault-addresses.yml` runs on ARM macOS and Linux. Select `both`, `macos`,
+or `linux` when dispatching it. It first probes the OS tracing tools, rebuilds
+the pinned frontend, and collects an initial memory diagnostic followed by
+untraced and traced repeats. All fault tracing needs root on the disposable CI
+runner; the Lean child retains the ordinary runner identity. Normal memory
+snapshots need no privilege.
+
+After the source/build preparation above, on macOS:
+
+```sh
+mkdir -p results/faults
+cc -O2 -std=c11 -Wall -Wextra -Werror -dynamiclib repro/lean-io-timing.c \
+  -o results/faults/lean-io-timing.dylib
+LEAN_NUM_THREADS=1 lake env python3 scripts/run-lean-faults.py \
+  --build results/inner-build --output results/faults
+python3 scripts/summarize-lean-faults.py results/faults --output results/faults/summary.json
+```
+
+Linux needs `perf` for the running kernel and the `.so` build of the interposer.
+The runner explicitly requests `perf --clockid mono`; omitting it invalidates
+alignment with Lean's phase clocks. Raw perf data, decoded events, ktrace output,
+phase snapshots, endpoint memory maps, accepted artifact mmap ranges, target
+PID, and target/task versus host memory counters are retained.
+
+`LEAN_MEMORY_TIMING=1` adds coarse per-phase disk bytes and resident memory;
+macOS also records compressed bytes and cumulative target decompressions.
+`LEAN_FAULT_REGIONS` requests an endpoint map census after the final phase
+marker. `LEAN_FAULT_MAPS` adds accepted artifact ranges to the I/O observer.
+These diagnostic modes preserve the workload but add observer work; compare
+untraced runs before using their elapsed times.
+
+The summary validates workload counts, successful exits, artifact call coverage,
+target identity, paired Mac events, trace loss and fault-count reconciliation.
+It retains mappings at the mmap completion boundary as a separate category;
+endpoint maps do not recover temporary allocations freed before the census.
+An incomplete trace fails validation after writing its diagnostic summary.
+Parser checks can be run with `python3 scripts/test-lean-fault-summary.py`.
+See `FINDINGS.md` for the measured mechanism split and observer limitations.
