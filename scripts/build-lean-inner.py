@@ -51,7 +51,7 @@ def main():
         export='-Wl,-export_dynamic' if sys.platform=='darwin' else '-Wl,--export-dynamic'
         run([prefix/'bin/leanc','-O3',*inputs,export,'-o',dest/'bin/lean'])
         run([dest/'bin/lean','--version'])
-    files=[original,patched,src/'util/shell.cpp',src/'shell/lean.cpp',Path('repro/lean-inner-timing.c'),
+    files=[original,patched,src/'util/shell.cpp',src/'shell/lean.cpp',Path('repro/lean-inner-timing.c'),Path('repro/lean-fault-regions.h'),
            Path(__file__),Path('scripts/instrument-lean-environment.py'),out/'control.c',out/'instrumented.c',
            out/'control/bin/lean',out/'instrumented/bin/lean',prefix/'bin/lean']
     files+=list((prefix/'lib/lean').glob('*.a'))

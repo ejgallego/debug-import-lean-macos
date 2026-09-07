@@ -26,6 +26,10 @@ enum { OPEN_N, OPEN_NS, HEADER_N, HEADER_NS, HEADER_BYTES, MAP_N, MAP_NS,
        COPY_BYTES, STAT_N, STAT_NS, CLOSE_N, CLOSE_NS, UNTRACKED_FD, METRICS };
 /* Public, fixed uint64 layout for debugger snapshots, independent of DWARF. */
 _Atomic uint64_t lean_io_totals[METRICS];
+static struct { uint64_t start, end, clock; } maps[50000];
+static _Atomic unsigned map_used;
+static int map_enabled;
+__attribute__((constructor)) static void map_setup(void) { map_enabled=getenv("LEAN_FAULT_MAPS")!=NULL; }
 static _Atomic unsigned char tracked[4096]; /* 1: artifact, 2: seek-to-zero fallback */
 static const char *names[METRICS] = {
     "open_count", "open_ns", "header_read_count", "header_read_ns", "header_read_bytes",
@@ -127,6 +131,10 @@ void *WRAP(mmap)(void *hint, size_t size, int prot, int flags, int fd, off_t off
         add(MAP_NS,tick()-a); add(MAP_N,1); add(MAP_BYTES,size);
         if (r==MAP_FAILED) add(MAP_FAILED_N,1);
         else if (hint && hint!=r) add(MAP_WRONG_N,1);
+        if (map_enabled && r!=MAP_FAILED && r==hint) {
+            unsigned i=atomic_fetch_add(&map_used,1);
+            if (i<50000) { maps[i].start=(uintptr_t)r; maps[i].end=(uintptr_t)r+size; maps[i].clock=tick(); }
+        }
     }
     errno=error;
     return r;
@@ -175,4 +183,12 @@ __attribute__((destructor)) static void report(void) {
     for (int i=0;i<METRICS;i++)
         fprintf(f,"  \"%s\": %llu%s\n",names[i],(unsigned long long)atomic_load(&lean_io_totals[i]), i+1==METRICS ? "" : ",");
     fputs("}\n",f); fclose(f);
+    path=getenv("LEAN_FAULT_MAPS");
+    if (!path) return;
+    f=fopen(path,"w"); if (!f) return;
+    unsigned n=atomic_load(&map_used);
+    fprintf(f,"{\"overflow\":%s,\"maps\":[",n>50000 ? "true" : "false");
+    for (unsigned i=0;i<n && i<50000;i++)
+        fprintf(f,"%s[%llu,%llu,%llu]",i ? "," : "",(unsigned long long)maps[i].start,(unsigned long long)maps[i].end,(unsigned long long)maps[i].clock);
+    fputs("]}\n",f); fclose(f);
 }

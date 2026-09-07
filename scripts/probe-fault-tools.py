@@ -30,3 +30,5 @@ for i,cmd in enumerate(commands):
         except (OSError,subprocess.TimeoutExpired) as e:code=str(e)
     records.append({'command':cmd,'exit':code});print(records[-1],flush=True)
 (out/'commands.json').write_text(json.dumps(records,indent=2))
+
+if platform.system()=="Linux" and (out/"perf.data").exists(): subprocess.run(["sudo","chmod","a+r",str(out/"perf.data")],check=True)
