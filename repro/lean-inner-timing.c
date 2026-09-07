@@ -1,5 +1,6 @@
 /* In-process phase snapshots. Buffer in memory; emit only at process exit. */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE
 #include <lean/lean.h>
 #include <stdint.h>
 #include <stdio.h>
