@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure a warm `import Mathlib` and emit a separate Lean profiler trace."""
+"""Measure legacy and module-system `import Mathlib` consumers."""
 
 from __future__ import annotations
 
@@ -16,6 +16,16 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+CASES = (
+    {"key": "legacy", "label": "Legacy import", "source": Path("ImportMathlib.lean")},
+    {
+        "key": "module",
+        "label": "Module-system import",
+        "source": Path("ImportMathlibModule.lean"),
+    },
+)
 
 
 def worker(command: list[str]) -> int:
@@ -114,6 +124,10 @@ def summarize(samples: list[dict[str, Any]], key: str) -> dict[str, float]:
     }
 
 
+def command_for(source: Path) -> list[str]:
+    return ["lake", "env", "lean", str(source)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--platform", required=True, dest="platform_label")
@@ -124,48 +138,72 @@ def main() -> int:
 
     if args.runs < 1 or args.warmups < 0:
         parser.error("--runs must be positive and --warmups must be non-negative")
+    for case in CASES:
+        if not case["source"].is_file():
+            parser.error(f"missing {case['source']}; run this script from the project root")
 
     output_dir = args.output_root / args.platform_label
     output_dir.mkdir(parents=True, exist_ok=True)
-    source = Path("ImportMathlib.lean")
-    if not source.is_file():
-        parser.error("run this script from the project root")
+    metrics = ["wall_seconds", "cpu_seconds", "max_rss_bytes"]
+    case_results: dict[str, dict[str, Any]] = {
+        case["key"]: {
+            "label": case["label"],
+            "source": str(case["source"]),
+            "command": command_for(case["source"]),
+            "samples": [],
+        }
+        for case in CASES
+    }
 
-    command = ["lake", "env", "lean", str(source)]
     for number in range(1, args.warmups + 1):
-        sample = run_sample(command)
-        print(f"warmup {number}/{args.warmups}: {sample['wall_seconds']:.3f} s")
+        order = CASES if number % 2 else tuple(reversed(CASES))
+        for case in order:
+            sample = run_sample(command_for(case["source"]))
+            print(
+                f"warmup {number}/{args.warmups} [{case['key']}]: "
+                f"{sample['wall_seconds']:.3f} s"
+            )
 
-    samples: list[dict[str, Any]] = []
     for number in range(1, args.runs + 1):
-        sample = run_sample(command)
-        samples.append(sample)
-        print(
-            f"sample {number}/{args.runs}: {sample['wall_seconds']:.3f} s, "
-            f"{sample['max_rss_bytes'] / 2**20:.1f} MiB peak RSS"
-        )
+        # Alternate order to avoid systematically giving either case the warmer cache.
+        order = CASES if number % 2 else tuple(reversed(CASES))
+        for case in order:
+            sample = run_sample(command_for(case["source"]))
+            case_results[case["key"]]["samples"].append(sample)
+            print(
+                f"sample {number}/{args.runs} [{case['key']}]: "
+                f"{sample['wall_seconds']:.3f} s, "
+                f"{sample['max_rss_bytes'] / 2**20:.1f} MiB peak RSS"
+            )
 
-    trace_path = (output_dir / "trace.json").resolve()
-    trace_command = [
-        "lake",
-        "env",
-        "lean",
-        "-Dtrace.profiler=true",
-        "-Dtrace.profiler.threshold=0",
-        f"-Dtrace.profiler.output={trace_path}",
-        str(source),
-    ]
-    trace_run = run_sample(trace_command)
-    if not trace_path.is_file():
-        raise RuntimeError(f"Lean succeeded but did not produce {trace_path}")
-    print(f"profiler trace: {trace_path} ({trace_path.stat().st_size} bytes)")
+    for case in CASES:
+        case_result = case_results[case["key"]]
+        trace_path = (output_dir / f"trace-{case['key']}.json").resolve()
+        trace_command = [
+            "lake",
+            "env",
+            "lean",
+            "-Dtrace.profiler=true",
+            "-Dtrace.profiler.threshold=0",
+            f"-Dtrace.profiler.output={trace_path}",
+            str(case["source"]),
+        ]
+        case_result["trace_run"] = run_sample(trace_command)
+        if not trace_path.is_file():
+            raise RuntimeError(f"Lean succeeded but did not produce {trace_path}")
+        case_result["trace_command"] = trace_command
+        case_result["trace_file"] = trace_path.name
+        case_result["trace_size_bytes"] = trace_path.stat().st_size
+        case_result["summary"] = {
+            metric: summarize(case_result["samples"], metric) for metric in metrics
+        }
+        print(f"profiler trace [{case['key']}]: {trace_path} ({trace_path.stat().st_size} bytes)")
 
     mathlib_dir = Path(".lake/packages/mathlib")
     lean_version = capture(["lake", "env", "lean", "--version"])
-    metrics = ["wall_seconds", "cpu_seconds", "max_rss_bytes"]
     result = {
-        "schema_version": 1,
-        "benchmark": "import Mathlib",
+        "schema_version": 2,
+        "benchmark": "import Mathlib: legacy vs module system",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "platform": {
             "label": args.platform_label,
@@ -196,20 +234,16 @@ def main() -> int:
             "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
         },
         "method": {
-            "command": command,
-            "warmups": args.warmups,
-            "runs": args.runs,
+            "warmups_per_case": args.warmups,
+            "runs_per_case": args.runs,
+            "measurement_order": "legacy,module on odd runs; module,legacy on even runs",
             "lean_num_threads": os.environ.get("LEAN_NUM_THREADS"),
             "timing_clock": "time.perf_counter_ns",
             "resource_api": "getrusage(RUSAGE_CHILDREN) in a fresh worker per sample",
             "cache_state": "warm OS page cache after explicit warmups",
-            "trace_command": trace_command,
+            "tracing": "one separate traced process per case; traces do not affect timed samples",
         },
-        "samples": samples,
-        "summary": {metric: summarize(samples, metric) for metric in metrics},
-        "trace_run": trace_run,
-        "trace_file": trace_path.name,
-        "trace_size_bytes": trace_path.stat().st_size,
+        "cases": case_results,
     }
     result_path = output_dir / "benchmark.json"
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

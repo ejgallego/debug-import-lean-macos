@@ -1,7 +1,7 @@
 # debug-import-lean-macos
 
-This project compares the cost of checking a Lean file whose only command is
-`import Mathlib` on GitHub-hosted Linux and macOS runners.
+This project compares the cost of checking minimal legacy and module-system
+Mathlib consumers on GitHub-hosted Linux and macOS runners.
 
 The workflow has three runtime jobs:
 
@@ -17,17 +17,22 @@ which Mathlib has a matching revision and cached build artifacts.
 
 ## What is measured
 
-Each platform runs two warm-ups followed by seven fresh Lean processes with
-`LEAN_NUM_THREADS=1`:
+Each platform runs two warm-ups per case followed by seven paired iterations
+with `LEAN_NUM_THREADS=1`. The order of the two cases alternates each iteration:
 
-```console
-lake env lean ImportMathlib.lean
+```lean
+-- Legacy
+import Mathlib
+
+-- Module system
+module
+public import Mathlib
 ```
 
 The raw JSON contains wall time, user and system CPU time, peak RSS, page faults,
-and context-switch counts for every process. The timed samples run without tracing
-overhead. One additional invocation enables `trace.profiler` and writes a Firefox
-Profiler-compatible `trace.json`.
+and context-switch counts for every process and both cases. Timed samples run
+without tracing overhead. Two additional invocations enable `trace.profiler` and
+write Firefox Profiler-compatible `trace-legacy.json` and `trace-module.json`.
 
 The comparison is deliberately described as a hosted-runner comparison. The jobs
 use the same architecture and thread count, but the underlying CPUs and
@@ -41,7 +46,7 @@ also start **Debug Lean import on macOS** manually from the Actions tab. The fin
 job writes its Markdown table to the GitHub job summary and uploads
 `comparison-report`. The `benchmark-linux` and `benchmark-macos` artifacts contain
 the raw samples and traces. The report fails if the two jobs did not resolve exactly
-the same Lean build, Mathlib commit, source commit, sample count, and thread count.
+the same Lean build, Mathlib commit, source commit, sample counts, and thread count.
 
 For a local Linux measurement:
 

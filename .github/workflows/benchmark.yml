@@ -37,7 +37,7 @@ jobs:
       LEAN_NUM_THREADS: "1"
       PYTHONHASHSEED: "0"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Select the latest Mathlib-compatible Lean nightly
         run: |
@@ -70,7 +70,7 @@ jobs:
             --runs "$BENCHMARK_RUNS"
 
       - name: Upload raw data and trace
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-${{ matrix.platform }}
           path: results/${{ matrix.platform }}/
@@ -83,10 +83,10 @@ jobs:
     if: ${{ always() && needs.benchmark.result == 'success' }}
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download benchmark artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: benchmark-*
           path: artifacts
@@ -113,7 +113,7 @@ jobs:
 
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: comparison-report
           path: results/report/

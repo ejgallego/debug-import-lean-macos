@@ -1,9 +1,12 @@
 name = "debug-import-lean-macos"
 version = "0.1.0"
-defaultTargets = ["ImportMathlib"]
+defaultTargets = ["ImportMathlib", "ImportMathlibModule"]
 
 [[lean_lib]]
 name = "ImportMathlib"
+
+[[lean_lib]]
+name = "ImportMathlibModule"
 
 [[require]]
 name = "mathlib"

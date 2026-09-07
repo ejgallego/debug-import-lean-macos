@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare Linux and macOS benchmark JSON files and write Markdown/JSON reports."""
+"""Compare two import styles across Linux and macOS benchmark results."""
 
 from __future__ import annotations
 
@@ -9,16 +9,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-def load(path: Path) -> dict[str, Any]:
-    with path.open() as stream:
-        data = json.load(stream)
-    if data.get("schema_version") != 1:
-        raise ValueError(f"unsupported schema in {path}")
-    return data
-
-
-def median(data: dict[str, Any], metric: str) -> float:
-    return float(data["summary"][metric]["median"])
+CASES = (("legacy", "Legacy import"), ("module", "Module system"))
+METRICS: tuple[tuple[str, str, Callable[[float], str]], ...]
 
 
 def seconds(value: float) -> str:
@@ -29,12 +21,41 @@ def mebibytes(value: float) -> str:
     return f"{value / 2**20:.1f} MiB"
 
 
+METRICS = (
+    ("wall_seconds", "Wall time", seconds),
+    ("cpu_seconds", "User + system CPU", seconds),
+    ("max_rss_bytes", "Peak RSS", mebibytes),
+)
+
+
+def load(path: Path) -> dict[str, Any]:
+    with path.open() as stream:
+        data = json.load(stream)
+    if data.get("schema_version") != 2:
+        raise ValueError(f"unsupported schema in {path}; expected schema version 2")
+    if set(data.get("cases", {})) != {key for key, _ in CASES}:
+        raise ValueError(f"missing benchmark cases in {path}")
+    return data
+
+
+def median(data: dict[str, Any], case: str, metric: str) -> float:
+    return float(data["cases"][case]["summary"][metric]["median"])
+
+
 def gibibytes(value: int | None) -> str:
     return "unknown" if value is None else f"{value / 2**30:.1f} GiB"
 
 
 def short_revision(value: str) -> str:
     return value[:12]
+
+
+def ratio(numerator: float, denominator: float) -> float | None:
+    return numerator / denominator if denominator else None
+
+
+def ratio_text(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f}×"
 
 
 def main() -> int:
@@ -63,7 +84,14 @@ def main() -> int:
             macos["versions"]["mathlib_revision"],
         ),
         "GitHub revision": (linux["github"]["sha"], macos["github"]["sha"]),
-        "sample count": (len(linux["samples"]), len(macos["samples"])),
+        "runs per case": (
+            linux["method"]["runs_per_case"],
+            macos["method"]["runs_per_case"],
+        ),
+        "warmups per case": (
+            linux["method"]["warmups_per_case"],
+            macos["method"]["warmups_per_case"],
+        ),
         "Lean threads": (
             linux["method"]["lean_num_threads"],
             macos["method"]["lean_num_threads"],
@@ -72,26 +100,32 @@ def main() -> int:
     mismatches = {name: values for name, values in checks.items() if values[0] != values[1]}
     comparable = not mismatches
 
-    metric_specs: list[tuple[str, str, Callable[[float], str]]] = [
-        ("wall_seconds", "Wall time", seconds),
-        ("cpu_seconds", "User + system CPU", seconds),
-        ("max_rss_bytes", "Peak RSS", mebibytes),
-    ]
-    comparisons: dict[str, Any] = {}
-    metric_rows: list[str] = []
-    for key, label, formatter in metric_specs:
-        linux_value = median(linux, key)
-        macos_value = median(macos, key)
-        ratio = macos_value / linux_value if linux_value else None
-        comparisons[key] = {
-            "linux_median": linux_value,
-            "macos_median": macos_value,
-            "macos_over_linux": ratio,
-        }
-        ratio_text = "n/a" if ratio is None else f"{ratio:.2f}×"
-        metric_rows.append(
-            f"| {label} | {formatter(linux_value)} | {formatter(macos_value)} | {ratio_text} |"
-        )
+    cross_platform: dict[str, Any] = {}
+    cross_rows: list[str] = []
+    for case_key, case_label in CASES:
+        cross_platform[case_key] = {}
+        for metric_key, metric_label, formatter in METRICS:
+            linux_value = median(linux, case_key, metric_key)
+            macos_value = median(macos, case_key, metric_key)
+            observed_ratio = ratio(macos_value, linux_value)
+            cross_platform[case_key][metric_key] = {
+                "linux_median": linux_value,
+                "macos_median": macos_value,
+                "macos_over_linux": observed_ratio,
+            }
+            cross_rows.append(
+                f"| {case_label} | {metric_label} | {formatter(linux_value)} | "
+                f"{formatter(macos_value)} | {ratio_text(observed_ratio)} |"
+            )
+
+    module_delta: dict[str, Any] = {"linux": {}, "macos": {}}
+    delta_rows: list[str] = []
+    for metric_key, metric_label, _ in METRICS:
+        linux_ratio = ratio(median(linux, "module", metric_key), median(linux, "legacy", metric_key))
+        macos_ratio = ratio(median(macos, "module", metric_key), median(macos, "legacy", metric_key))
+        module_delta["linux"][metric_key] = linux_ratio
+        module_delta["macos"][metric_key] = macos_ratio
+        delta_rows.append(f"| {metric_label} | {ratio_text(linux_ratio)} | {ratio_text(macos_ratio)} |")
 
     def environment_row(data: dict[str, Any]) -> str:
         info = data["platform"]
@@ -103,7 +137,7 @@ def main() -> int:
         )
 
     if comparable:
-        status = "✅ Both jobs used the same Lean build, Mathlib revision, source revision, sample count, and thread count."
+        status = "✅ Both jobs used the same Lean build, Mathlib revision, source revision, run counts, and thread count."
     else:
         details = "; ".join(f"{name}: {left!r} vs {right!r}" for name, (left, right) in mismatches.items())
         status = f"❌ Results are not directly comparable: {details}."
@@ -116,19 +150,30 @@ def main() -> int:
             "",
             "## Median warm-import cost",
             "",
-            "| Metric | Linux | macOS | macOS / Linux |",
-            "|---|---:|---:|---:|",
-            *metric_rows,
+            "| Import style | Metric | Linux | macOS | macOS / Linux |",
+            "|---|---|---:|---:|---:|",
+            *cross_rows,
             "",
-            f"Each result is the median of {len(linux['samples'])} measured processes after "
-            f"{linux['method']['warmups']} warm-ups, with `LEAN_NUM_THREADS={linux['method']['lean_num_threads']}`. "
-            "The timing samples do not enable tracing; each platform also performs one separate traced run.",
+            "## Module-system delta",
+            "",
+            "Ratios below are module-system / legacy within the same platform; lower is better.",
+            "",
+            "| Metric | Linux | macOS |",
+            "|---|---:|---:|",
+            *delta_rows,
+            "",
+            f"Each case is the median of {linux['method']['runs_per_case']} measured processes after "
+            f"{linux['method']['warmups_per_case']} warm-ups per case, with "
+            f"`LEAN_NUM_THREADS={linux['method']['lean_num_threads']}`. Case order alternates each iteration. "
+            "Timing samples do not enable tracing; each platform performs one separate traced run per case.",
             "",
             "## Inputs",
             "",
             f"- Lean: `{linux['versions']['lean_toolchain']}`",
             f"- Mathlib: `{short_revision(linux['versions']['mathlib_revision'])}` from `nightly-testing`",
             f"- Source: `{short_revision(linux['github']['sha'] or 'local')}`",
+            "- Legacy source: `import Mathlib`",
+            "- Module-system source: `module` followed by `public import Mathlib`",
             "",
             "## Runner environments",
             "",
@@ -139,20 +184,21 @@ def main() -> int:
             "",
             "## Interpretation",
             "",
-            "This compares the end-to-end process cost of checking a file containing only `import Mathlib` "
-            "on GitHub-hosted x86-64 runners. It includes Lean/Lake startup and loading cached Mathlib artifacts. "
-            "Because the runner hardware and virtualization differ, the ratio is an observed runner ratio, not an "
-            "OS-only effect. Download each platform artifact for raw samples and its Firefox Profiler-compatible "
-            "`trace.json`.",
+            "This compares the end-to-end process cost of checking minimal Mathlib consumers on GitHub-hosted "
+            "x86-64 runners. It includes Lean/Lake startup and loading cached Mathlib artifacts. Because runner "
+            "hardware and virtualization differ, macOS / Linux is an observed runner ratio, not an OS-only effect. "
+            "The within-platform module-system / legacy ratio is the cleaner comparison of import modes. Download "
+            "each platform artifact for raw samples and the two Firefox Profiler-compatible traces.",
             "",
         ]
     )
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "comparable": comparable,
         "mismatches": mismatches,
-        "comparisons": comparisons,
+        "cross_platform": cross_platform,
+        "module_system_delta": module_delta,
         "linux": str(args.linux),
         "macos": str(args.macos),
     }
