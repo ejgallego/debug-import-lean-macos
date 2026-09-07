@@ -35,7 +35,7 @@ for name in ['memory-initial','plain-1','memory-1','trace-1','memory-2','plain-2
                     'LEAN_PATH':os.environ['LEAN_PATH'],'LEAN_NUM_THREADS':os.environ.get('LEAN_NUM_THREADS','1')})
         child=['sudo','-u',os.environ['USER'],'env',*[k+'='+v for k,v in env.items()],*command]
         if sys.platform=='darwin': command=['sudo','ktrace','trace','-t','-N','-p','lean','-f','S0x0130','-b','128','-T','180','-c',*child]
-        else: command=['sudo','perf','record','-e','minor-faults,major-faults','-c','1','-d','-m','64M','-o',str(out/(name+'.data')),'--',*child]
+        else: command=['sudo','perf','record','--clockid','mono','-e','minor-faults,major-faults','-c','1','-d','-m','64M','-o',str(out/(name+'.data')),'--',*child]
         env={} # Do not preload the tracing program.
     profile.snapshot(out,name+'-before')
     worker={'output':str(out),'name':name,'command':command,'timeout':240,'sample':False,'environment':env}
