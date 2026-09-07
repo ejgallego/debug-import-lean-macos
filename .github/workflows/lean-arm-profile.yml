@@ -1,0 +1,45 @@
+name: ARM Lean import profile
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - experiments/lean-arm-profile
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lean-arm-profile-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  profile:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      LEAN_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned Lean
+        uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: false
+      - name: Download pinned artifacts
+        run: |
+          lake exe cache get
+          git diff --exit-code -- lean-toolchain lake-manifest.json
+      - name: Profile the direct Lean process
+        run: lake env python3 scripts/profile-lean-import.py --output results/lean-arm-profile
+      - name: Publish raw profiles and baselines
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lean-arm-profile
+          path: results/lean-arm-profile/
+          if-no-files-found: warn
+          retention-days: 30

@@ -164,6 +164,33 @@ runner's smaller RAM is a potential pressure variable, not an OS-only comparison
 
 ## Initial local control
 
+## Profile the remaining ARM import cost
+
+The `ARM Lean import profile` workflow runs only on `macos-15` (ARM), using the
+same pinned Lean and Mathlib. Pushes to `experiments/lean-arm-profile` trigger it.
+It profiles the actual module import, not the C replay:
+
+```sh
+env LEAN_NUM_THREADS=1 lake env python3 scripts/profile-lean-import.py \
+  --output results/lean-arm-profile
+```
+
+It retains the first import as warmup, runs two unprofiled imports, a separate
+native-sampled import, then one final unprofiled import. `wait4` reports CPU,
+peak RSS, faults, and resource counters for the direct Lean PID; profiler and
+monitoring processes are excluded. The diagnostic uses `sample` at 1 ms for up
+to 120 seconds, with `-mayDie` to retain symbols if Lean exits. It also records
+roughly one-second process/VM observations. Each Lean process has a five-minute
+timeout. Native samples include waiting threads and kernel-call boundaries;
+they do not supply internal kernel stacks or a CPU-only time breakdown.
+
+Artifacts preserve raw profiles, the runner's `sample` manual, per-process
+metrics, diagnostic timelines, host-wide VM snapshots, and input identities.
+Check PID, symbols, coverage, tool exits, and diagnostic overhead before deriving
+attribution. Use `--no-sample` for a local Linux functional control.
+
+## Initial local control
+
 The first local Linux check mapped all 37,687 regions (7,303,535,912 file bytes)
 at their saved addresses with no fallback. Comparing Linux strace captures of
 Lean and C confirmed the same artifact mmap request sequence: addresses, lengths,
