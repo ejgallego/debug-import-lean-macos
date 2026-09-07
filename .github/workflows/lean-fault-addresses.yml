@@ -1,0 +1,27 @@
+name: Lean fault address investigation
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiments/lean-fault-addresses]
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux perf
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y linux-tools-common linux-tools-$(uname -r)
+      - name: Probe VM fault tracing
+        run: python3 scripts/probe-fault-tools.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fault-probe-${{ matrix.runner }}
+          path: results/fault-probe/
