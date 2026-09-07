@@ -427,3 +427,122 @@ extension entries, and persistent marking within that phase. Next measure those
 substeps together with per-phase CPU/page-in information to distinguish ordinary
 CPU work from access to mapped or compressed pages. A C replay of mmap calls
 alone cannot reproduce this finalization access pattern.
+
+## Real Lean phase CPU and faults across Linux and ARM macOS
+
+Successful CI run [34135145113](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34135145113),
+source `941f5b9991f173f82d2fbee0e5a01847e627af56`, runs the actual pinned Lean
+executable on ARM macOS, ARM Linux, and x86-64 Linux. No C replay timings enter
+this comparison. All three jobs pass; all 27 Lean processes exit successfully.
+Raw artifacts are `lean-phases-{macos-arm64,linux-arm64,linux-x86_64}`; local
+copies are under `results/ci-34135145113/`.
+
+Workload: `ImportMathlibModule.lean` (`module; public import Mathlib`), Lean
+`58774429865502f05c63239266aac30ef1e91ef7`, Mathlib
+`9d1a52c11563a55a41e0fb61ed0865b384bfdb6d`, `LEAN_NUM_THREADS=1`, ASLR enabled.
+The same nine-process order runs on each host: initial import, baseline-1,
+io-1, phases-1, phases-2, io-2, baseline-2, phases-3, baseline-3.
+
+The macOS host is macOS 15.7.9 ARM64 with 7 GiB RAM and 16 KiB pages. Linux
+hosts use Ubuntu 24.04, kernel 6.17.0-1022-azure, glibc 2.39, approximately
+15.6 GiB RAM and 4 KiB pages. ARM Linux removes the architecture mismatch but
+not CPU, memory, storage, virtualization, or cache-state differences. These
+are host comparisons, not isolated estimates of an OS effect.
+
+### Whole-process controls and phase elapsed times
+
+All values below are medians of three measurements, in seconds. The whole-import
+row uses uninstrumented warm controls. Phase rows use separate LLDB diagnostics;
+the mmap row is contained within loading, and must not be added to it.
+
+| Measurement | ARM Linux | ARM macOS | x86-64 Linux control |
+|---|---:|---:|---:|
+| Warm whole import, uninstrumented | 2.918 | 18.122 | 3.453 |
+| Loading phase | 0.764 | 10.698 | 1.363 |
+| Artifact mmap calls within loading | 0.081 | 6.939 | 0.158 |
+| Loading minus artifact mmap | 0.683 | 3.471 | 1.206 |
+| Finalization phase | 2.007 | 8.547 | 1.879 |
+
+Individual ARM macOS uninstrumented warm controls are 14.440, 21.846, and
+18.122 s, with 433, 3,305, and 795 major faults. ARM Linux controls are 2.918,
+2.924, and 2.898 s with zero major faults. The first process takes 64.284 s on
+Mac (118,808 major faults) versus 3.102 s on ARM Linux (zero major faults).
+Artifact download does not establish equivalent cold caches, so that initial
+ratio must not be interpreted as a controlled cold-start comparison.
+
+This batch's warm host ratio is about 6.2x. Real artifact mmap time differs by
+about 86x against ARM Linux, confirming that the C reproducer's slow cost class
+is present in real Lean. Finalization differs by about 4.3x; mmap alone does not
+explain the import gap. Do not subtract diagnostic phase times from separate
+uninstrumented runs or infer the attainable speedup of a mapping-policy change.
+Medians of differences and differences of medians also need not agree.
+
+### Phase CPU and memory activity
+
+The observer reads the stopped Lean process externally. Linux CPU uses
+`/proc/PID/stat` at 10 ms resolution. ARM macOS uses
+`proc_pidinfo(PROC_PIDTASKINFO)` and converts Mach time units with
+`mach_timebase_info`. Each job checks the units against a 0.3 s process CPU busy
+loop before running Lean; all pass. CPU includes all Lean threads, excluding
+the observer. The underlying interfaces are described by the
+[Linux proc stat manual](https://www.man7.org/linux/man-pages/man5/proc_pid_stat.5.html)
+and [XNU's task counter export](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/bsd_kern.c).
+
+| Host / phase | Median wall s | Median user CPU s | Median kernel CPU s | Median total CPU s | Median wall minus CPU s |
+|---|---:|---:|---:|---:|---:|
+| ARM Linux / loading | 0.764 | 0.270 | 0.490 | 0.760 | 0.004 |
+| ARM macOS / loading | 10.698 | 0.533 | 7.105 | 7.638 | 2.831 |
+| ARM Linux / finalization | 2.007 | 1.920 | 0.080 | 2.010 | 0.006 |
+| ARM macOS / finalization | 8.547 | 5.727 | 1.137 | 6.719 | 1.828 |
+
+Columns are independently computed medians. Linux CPU quantization can exceed
+wall by a few milliseconds. Wall minus CPU includes scheduling, waits, and
+debugger transport; it is not a measured disk-wait interval. The key new finding
+is that macOS finalization's additional cost includes substantial user CPU and
+kernel CPU, as well as an elapsed-time residual. It cannot all be assigned to
+waiting for file reads.
+
+| ARM macOS diagnostic | Load wall s | Load page-ins | Finalize wall s | Finalize page-ins | Finalize total CPU s |
+|---|---:|---:|---:|---:|---:|
+| phases-1 | 9.357 | 168 | 8.547 | 2,098 | 6.719 |
+| phases-2 | 12.425 | 1,474 | 8.448 | 14,507 | 6.681 |
+| phases-3 | 10.698 | 565 | 10.721 | 6,826 | 7.076 |
+
+All Linux phase measurements have zero major faults. ARM Linux finalization
+has approximately 44,000 minor faults; Mac finalization records 234,083–235,178
+total faults and zero reported COW faults. Retain the native counter names;
+page sizes and fault accounting differ. Mac finalization adds roughly 2.32 GB
+resident memory and ARM Linux about 2.14 GB; these deltas are not peaks.
+The data do not support attributing the Mac finalization cost to COW faults.
+Page-ins occur after repeated imports, but neither their count nor phase elapsed
+time has a simple monotonic relationship in these three samples.
+
+All five instrumented processes per host capture exactly 37,687 artifact opens,
+stats, header reads, mappings and closes, with 3,316,456 header bytes and
+7,303,535,912 requested mapping bytes. All phase entries start with zero artifact
+counters; all counts and timed calls occur during loading, with zero increments
+during finalization. Each Mac phase process falls back on 122 mappings and reads
+30,735,064 bytes. ARM Linux has 3 fallbacks / 358,568 bytes in phases-1 and zero
+in phases-2/3; x86-64 Linux has none. Thus finalization page-ins occur without any
+of the tracked artifact syscalls. This is compatible with accesses to mapped
+memory and other memory activity; it does not identify individual faulting pages.
+
+### Limits and next experiment
+
+LLDB and the injected library can change address layout and memory pressure.
+In particular, the debugger shares the Mac runner's 7 GiB RAM and could increase
+page-ins. The uninstrumented controls themselves show warm faults and variability,
+but the larger diagnostic page-in counts must not be presented as baseline counts
+or proof of aggressive reclamation. The passive I/O processes take 15.322 and
+15.452 s, within the range of the surrounding uninstrumented controls; this is
+not a calibrated overhead estimate.
+
+The next focused experiment should split finalization into constant-table
+construction, persistent marking, extension initialization, and imported-entry
+processing, using the native profiles to choose boundaries. Prefer a temporary
+Lean build with in-process phase resource snapshots to remove LLDB's memory
+footprint, paired with an unmodified build on the same machine. Keep first-use
+and warm repetitions separate and record host memory pressure. A controlled
+intervening-memory workload is still needed to establish cache loss causally.
+Continue using C to isolate the mapping-order mechanism, while grounding the
+remaining work in these real Lean phases.

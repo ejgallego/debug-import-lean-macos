@@ -330,3 +330,22 @@ variation between these three diagnostics is in finalization. Uninstrumented
 controls vary too, so the diagnostic timings are not exact baseline attribution.
 The next bounded step is finalization substep timing with per-phase CPU/page-in
 data, then using the observed access pattern to improve the C reproduction.
+
+### Cross-platform phase update
+
+Run `34135145113` now provides actual Lean phase wall/CPU/fault measurements on
+ARM macOS, ARM Linux, and x86-64 Linux, with every capture check passing. Warm
+uninstrumented median imports are 18.122 s on ARM Mac versus 2.918 s on ARM Linux.
+The phase diagnostics measure loading at 10.698 versus 0.764 s, including actual
+artifact mmap at 6.939 versus 0.081 s; finalization is 8.547 versus 2.007 s.
+Mac finalization includes about 6.7 s total CPU and warm page-ins, while Linux
+finalization uses about 2 s CPU and no major faults. See `repro/FINDINGS.md` for
+individual measurements and limits; different CI hardware/RAM and debugger
+memory effects prevent treating these ratios as pure OS effects.
+
+Next split real Lean finalization at the native-profile hotspots, preferably in
+a temporary instrumented Lean build to remove LLDB's memory footprint. Pair it
+with the stock executable on the same host. Measure user/kernel CPU and faults
+at those boundaries, and use controlled memory pressure before attributing warm
+page-ins to aggressive eviction. The mapping-order C reduction remains useful,
+but its timings cannot substitute for the real import's finalization work.

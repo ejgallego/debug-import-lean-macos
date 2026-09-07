@@ -228,8 +228,8 @@ can itself change address collisions, so compare fallback counts too.
 
 After a first uninstrumented import, the suite runs uninstrumented, I/O-timed,
 and phase-timed processes in a recorded sequence. Raw baselines, debugger logs,
-phase events, timing counters, and VM snapshots are preserved. The Linux preload
-backend is only a functional control; decisive timings are ARM macOS.
+phase events, timing counters, and VM snapshots are preserved. The cross-platform
+workflow below extends the same phase method to Linux.
 
 This uses Apple's
 [static dyld interposition mechanism](https://github.com/apple-oss-distributions/dyld)
@@ -244,7 +244,7 @@ protections, flags, paths, and offsets. Repeated passes through unchanged
 mappings were about 0.02 seconds after a roughly 0.4-second first pass. This is
 a functional control, not macOS evidence or a comparison with CI hardware.
 
-### Cross-platform real Lean phases
+## Cross-platform real Lean phases
 
 `lean-platform-phases.yml` runs the same pinned `module; public import Mathlib`
 consumer on ARM macOS, ARM Linux, and x86-64 Linux. Each job runs one initial
@@ -262,15 +262,18 @@ cc -O2 -g -std=c11 -Wall -Wextra -Werror -shared -fPIC \
 LEAN_NUM_THREADS=1 lake env python3 scripts/run-lean-phases.py --output results/platform-phases
 ```
 
-On ARM macOS, build `lean-io-timing.dylib` with `-dynamiclib` instead of
-`-shared -fPIC -ldl`, and also build the external observer:
+On ARM macOS:
 
 ```sh
+mkdir -p results/platform-phases
+cc -O2 -g -std=c11 -Wall -Wextra -Werror -dynamiclib \
+  repro/lean-io-timing.c -o results/platform-phases/lean-io-timing.dylib
 cc -O2 -g -std=c11 -Wall -Wextra -Werror repro/process-usage.c \
   -o results/platform-phases/process-usage
+LEAN_NUM_THREADS=1 lake env python3 scripts/run-lean-phases.py --output results/platform-phases
 ```
 
-The same runner command then applies. Output must be fresh. `records.json`
+Output must be fresh. `records.json`
 contains phase wall time, user/kernel CPU, resource counter snapshots and deltas,
 and artifact syscall times. The runner checks the CPU counter units against a
 short busy loop, and validates that all 37,687 artifact operations fall inside
