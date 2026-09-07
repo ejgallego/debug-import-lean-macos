@@ -203,6 +203,38 @@ the most `importModules` observations. Its disjoint categories exclude other
 threads' idle observations from the denominator. Counts are stack observations,
 not exact seconds or CPU-only percentages; retain and inspect the raw call tree.
 
+## Direct phase and syscall timings on ARM
+
+The `ARM Lean phase timings` workflow on `experiments/lean-arm-phases` uses the
+unchanged pinned Lean executable. A diagnostic library interposes artifact
+`open`, `read`, `mmap`, `lseek`, `fstat`, and `close` calls. It keeps aggregate
+elapsed times in memory and writes them at process exit. It passes mapping
+arguments through unchanged. Files are identified by the compacted-artifact
+suffixes used in the captured workload; duplicated descriptors and unrelated
+loader APIs are not a general-purpose tracing interface.
+
+The library classifies reads after the loader's successful seek back to offset
+zero as copy-fallback reads. Their time excludes allocation, rejected-map cleanup,
+and relocation. Before-seek reads are checked against the expected 88-byte
+headers for all 37,687 mappings. The runner rejects incomplete capture, including
+descriptor-table overflow or inconsistent fallback counts.
+
+LLDB separately records entry and return of `l_Lean_importModulesCore` and
+`l_Lean_finalizeImport`, taking counter snapshots by reading target memory.
+ASLR remains enabled. Only four phase stops are expected per import. Phase wall
+times exclude the entry handler body but include debugger stop/resume transport;
+they are diagnostics, not uninstrumented baseline times. Loading an extra library
+can itself change address collisions, so compare fallback counts too.
+
+After a first uninstrumented import, the suite runs uninstrumented, I/O-timed,
+and phase-timed processes in a recorded sequence. Raw baselines, debugger logs,
+phase events, timing counters, and VM snapshots are preserved. The Linux preload
+backend is only a functional control; decisive timings are ARM macOS.
+
+This uses Apple's
+[static dyld interposition mechanism](https://github.com/apple-oss-distributions/dyld)
+and the [LLDB Python API](https://lldb.llvm.org/use/python-reference.html).
+
 ## Initial local control
 
 The first local Linux check mapped all 37,687 regions (7,303,535,912 file bytes)

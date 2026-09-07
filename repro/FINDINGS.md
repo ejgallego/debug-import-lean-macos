@@ -330,3 +330,100 @@ distinguish the warm outlier's mapping cost from finalization cost. Reproduce
 cache loss under a controlled intervening workload before claiming aggressive
 warm-page eviction. These ARM results concern the module-system consumer;
 legacy imports and the original laptop conditions still need their own checks.
+
+## Direct artifact I/O and phase timers on ARM
+
+The next experiment retains the pinned Lean executable. A small interposed
+library times actual artifact calls without changing their arguments. It records
+header reads separately from reads following the loader's seek back to zero for
+copy fallback. LLDB marks the entry/return of `l_Lean_importModulesCore` and
+`l_Lean_finalizeImport`, with ASLR enabled and counter snapshots read directly
+from target memory. Phase stops and the extra library remain diagnostic changes;
+they may affect cache state and address collisions.
+
+The first attempt,
+[run 34130546339](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34130546339)
+at source `411bd09`, **failed its phase-measurement validation**. Apple's LLDB
+raised a Python autogen-name `KeyError` when a breakpoint callback registered
+another callback for the function return. The harness stopped those incomplete
+targets and did not report phase durations. The subsequent implementation uses
+an explicit synchronous stop/resume loop instead.
+
+The two independent I/O-only processes in that run completed and passed the
+capture checks: 37,687 mappings, 3,316,456 header bytes, no descriptor-table
+overflow, and 122 rejected mappings matched by 122 seek-to-zero copy fallbacks.
+Each copies 30,735,064 bytes. Their direct Lean timings were:
+
+| I/O-only run | Total wall s | mmap s | Header reads s | Copy-fallback reads s | Open s |
+|---|---:|---:|---:|---:|---:|
+| 1 | 20.495 | 9.182 | 0.502 | 0.089 | 0.932 |
+| 2 | 20.189 | 6.814 | 0.564 | 0.099 | 0.918 |
+
+Tracked `fstat` and close calls add about 0.11 s per run. Consequently about
+9.7/11.7 s remains outside these tracked calls. That remainder includes other
+loading work and finalization; the failed phase measurements cannot divide it.
+The fallback read itself is small, but these counters exclude fallback
+allocation, rejected-map cleanup, and any induced relocation work.
+
+Uninstrumented warm baselines on that VM range from 17.8 to 27.1 s, so the
+I/O-only runs sit within the observed variation; this is not a precise overhead
+estimate. The initial uninstrumented import takes 76.6 s with 118,790 major
+faults. The two I/O-only runs have 247 and one major fault respectively. These
+results again separate high first-use fault counts from slower warm execution.
+
+### Successful loading/finalization split
+
+[Run 34131902959](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34131902959)
+at source `b7835ac` passes all nine processes and all phase/capture checks using
+the synchronous LLDB loop. All three diagnostic imports have exactly one load
+phase followed by one finalization phase, on the same import thread. The load
+phase starts with zero counters and accounts for all 37,687 artifact mappings,
+all 3,316,456 header bytes, and every tracked artifact open/fstat/close. Finalization
+adds zero to every tracked artifact-call counter. This checks that the selected
+boundaries frame the intended work.
+
+The following columns are disjoint: `mmap` time is removed from the loading phase
+to compute other loading work. They are debugger-run phase measurements, not
+uninstrumented end-to-end baselines.
+
+| Diagnostic run | Artifact mmap s | Other loading work s | Finalization s | Sum of import phases s |
+|---|---:|---:|---:|---:|
+| 1 | 5.948 | 2.203 | 6.854 | 15.005 |
+| 2 | 6.023 | 2.318 | 6.203 | 14.544 |
+| 3 | 5.987 | 2.092 | 5.112 | 13.191 |
+
+The full loading phase is 8.079–8.340 s. Within it, tracked opens take
+0.658–0.714 s, header reads 0.271–0.322 s, copy-fallback reads 0.019–0.067 s,
+and fstat plus close about 0.08–0.09 s. About 1.06–1.14 s remains in other
+loading activity, which includes pathname operations not covered by the tracked
+descriptor calls, import bookkeeping, mapped-object access, and instrumentation.
+
+All three have 122–128 rejected-address fallbacks, copying 30.7–31.1 MB. Fallback
+read time is small; allocation, rejected-map cleanup, and induced relocation are
+still outside that particular counter. Extra library placement and ASLR can
+change collisions, so these are not assertions that instrumented and baseline
+address maps are identical.
+
+Across these three diagnostics, mmap varies by only 0.074 s while finalization
+varies by 1.743 s. From run 1 to run 3, about 96% of the drop in the sum of import
+phase times is in finalization. This locates the observed variation within these
+runs, not the cause of all earlier slow warm outliers. Finalization's lack of
+artifact syscalls does not rule out faults on already-mapped pages, compression,
+anonymous allocation, or other filesystem activity.
+
+Uninstrumented warm baselines on this VM are 18.719, 12.131, and 14.307 s.
+I/O-only runs are 11.053 and 13.575 s, with 4.973 and 5.781 s in mmap. The first
+uninstrumented import is 57.086 s with 118,795 major faults; warm baselines have
+one, zero, and seven major faults. These process and timing differences prevent
+a precise diagnostic-overhead estimate. Debugger launch-to-exit times are
+14.302–16.486 s; the phase sums exclude startup/exit and some debugger work.
+The explicit phase handlers take only 0.9–3.9 ms individually, but stop/resume
+transport and memory/cache perturbation are not independently calibrated.
+
+The remaining warm work is now localized: roughly two seconds of loading beyond
+mmap, followed by several seconds of environment finalization. The previous
+native profiles identify constant tables, extension initialization, imported
+extension entries, and persistent marking within that phase. Next measure those
+substeps together with per-phase CPU/page-in information to distinguish ordinary
+CPU work from access to mapped or compressed pages. A C replay of mmap calls
+alone cannot reproduce this finalization access pattern.

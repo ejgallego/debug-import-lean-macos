@@ -320,3 +320,13 @@ boundaries, especially in a slow warm outlier. Use observed sparse access order
 to extend the C replay. Test cache loss with a controlled intervening workload;
 the data so far do not establish an aggressive reclamation policy and do not
 justify treating a first-use import as the steady warm baseline.
+
+Direct phase timings are now available from the successful ARM run
+`34131902959`. Three debugger diagnostics measure about 5.95–6.02 s in actual
+artifact mmap calls, 2.09–2.32 s in other loading work, and 5.11–6.85 s in
+finalization. All artifact calls occur within loading; finalization issues none
+of the tracked artifact calls, though mapped accesses can still fault. Most
+variation between these three diagnostics is in finalization. Uninstrumented
+controls vary too, so the diagnostic timings are not exact baseline attribution.
+The next bounded step is finalization substep timing with per-phase CPU/page-in
+data, then using the observed access pattern to improve the C reproduction.
