@@ -402,3 +402,46 @@ endpoint maps do not recover temporary allocations freed before the census.
 An incomplete trace fails validation after writing its diagnostic summary.
 Parser checks can be run with `python3 scripts/test-lean-fault-summary.py`.
 See `FINDINGS.md` for the measured mechanism split and observer limitations.
+
+## Process-only transparent huge page control (ARM Linux)
+
+`lean-thp.yml` compares the same Lean executable with the host's default THP
+policy and with `PR_SET_THP_DISABLE` set before `exec`. The small
+`lean-thp-exec.c` launcher checks its inherited and requested states, then becomes
+the target process. The instrumented target independently verifies the state
+at startup and exit. No host setting is changed, and no privilege is needed for
+this process-scoped intervention.
+
+After building the pinned instrumented frontend as above:
+
+```sh
+mkdir -p results/thp
+cc -O2 -std=c11 -Wall -Wextra -Werror -shared -fPIC repro/lean-io-timing.c \
+  -ldl -o results/thp/lean-io-timing.so
+LEAN_NUM_THREADS=1 lake env python3 scripts/run-lean-thp.py \
+  --build results/inner-build --output results/thp
+python3 scripts/summarize-lean-faults.py results/thp --output results/thp/fault-summary.json
+python3 scripts/summarize-lean-thp.py results/thp
+```
+
+The full suite has 28 imports: stock and instrumented warmups in both modes,
+four AB/BA pairs for each binary, then two pairs each for page censuses and
+fault traces. Initial runs are retained separately. Use `--no-trace` to omit the
+privileged `perf` diagnostics; `--repetitions 2` gives a shorter local validation.
+The main stock timing runs have no in-process observer enabled. Phase timing
+runs collect the existing coarse resource snapshots but have no huge-page census
+or tracer. The same executable is used for both policies within each comparison.
+
+`LEAN_THP_TIMING=1` enables separate `/proc/self/smaps_rollup` snapshots around
+load, private tables, extension initialization, and outer finalization. They
+record `Anonymous`, `AnonHugePages`, and time spent reading the census. These
+reads walk many mappings and measurably add kernel work; their timings are
+excluded from the headline comparison. `AnonHugePages` measures resident huge
+pages at the snapshot, not cumulative allocation or all possible THP sizes.
+Host THP policy for each exposed size is recorded before and checked after.
+
+`thp-summary.md` and `thp-summary.json` preserve distributions and paired timing
+ratios as well as the separate page census. `fault-summary.json` retains address
+classes and phase-count reconciliation. A default run with no observed huge pages
+is explicitly identified, since disabling an unused mechanism would not test the
+hypothesis. The raw launch, target, phase and perf records remain the evidence.

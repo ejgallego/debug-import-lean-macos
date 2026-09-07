@@ -876,3 +876,154 @@ volume. In parallel as a research direction, sample the remaining CPU-heavy
 private-table/parser work and isolate `ImportState` release. Keep the already
 established mmap address-order problem separate: these fault results do not
 explain away its mapping-setup cost.
+
+## Process-scoped THP intervention (September 7, 2026)
+
+**Linux transparent huge pages explain a large part of the low allocation-fault
+count, but only a modest part of import time.** In the same ARM runner, disabling
+THP for the Lean process approximately doubles whole-import minor faults while
+increasing stock import time by 6.2–7.4% in every matched pair. This is a causal
+intervention within Linux; it does not make Mac/Linux fault counts equivalent
+or explain the much larger observed cross-platform timing gap.
+
+[CI run 34159533214](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34159533214)
+(source `f0f9164de09bda93dc3286bfd007bbf28b041002`) successfully completes all
+28 imports and four fault-trace validations. The runner is ARM Neoverse-N2,
+Linux 6.17.0-1022-azure / glibc 2.39, approximately 15.6 GiB RAM, 4 KiB base
+pages. Lean, Mathlib, workload and one-thread setting remain pinned as above.
+Raw artifacts are retained locally in `results/ci-34159533214/`; generated
+`thp/thp-summary.{json,md}` reports full distributions, paired ratios, census
+snapshots and host counters. `thp/fault-summary.json` contains address attribution
+and exact phase-count reconciliation for all four traces.
+
+### What changed and what was controlled
+
+A small launcher applies
+[`PR_SET_THP_DISABLE`](https://www.kernel.org/doc/html/latest/admin-guide/mm/transhuge.html)
+before `exec`, so the setting covers the target's startup allocations as well
+as the import. The default arm preserves the inherited policy. The launcher
+verifies its before/after state; the instrumented Lean independently reports
+`PR_GET_THP_DISABLE` at startup and exit. Launch/target PIDs agree. All disabled
+censuses report zero `AnonHugePages` throughout, while default censuses show
+substantial huge-page use. This is not merely a requested but ineffective flag.
+
+Host settings remain unchanged: THP policy and defragmentation are `madvise`,
+2 MiB THPs inherit that policy, and the exposed smaller sizes are `never`.
+The target therefore uses 2 MiB anonymous THPs under the default configuration.
+The same stock binary is compared across policies, and separately the same
+instrumented binary is compared across policies. No artifacts are rebuilt
+between paired imports. Do not treat differences between stock and relinked
+absolute times as the intervention effect.
+
+Each binary has a warmup in both modes, followed by four pairs ordered AB, BA,
+AB, BA. Then two pairs each collect huge-page censuses and fault traces as
+separate diagnostics. Stock timing runs have no observer enabled. Phase timing
+runs have the existing resource snapshots but neither tracer nor page census.
+
+### Timing and fault-count results
+
+All values below are medians of four repeats per policy, excluding warmups.
+Minor faults are same-OS comparisons. All warm stock major-fault counts are zero;
+all phase load/finalize disk-read byte deltas are zero in both policies.
+
+| Measurement | Default THP | THP disabled | Interpretation |
+|---|---:|---:|---|
+| Stock import elapsed | 3.300 s | 3.509 s | About 0.21 s additional time |
+| Stock import CPU | 3.284 s | 3.494 s | Increase is CPU time |
+| Stock import minor faults | 91,471 | 186,345 | About 95,000 extra faults |
+| Phase: load elapsed | 0.742 s | 0.762 s | Small change |
+| Phase: finalization elapsed | 2.122 s | 2.354 s | Phase timings have more variability |
+| Phase: finalization minor faults | 44,050.5 | 133,818 | About three times as many |
+| Private-table elapsed | 0.424 s | 0.503 s | Affected allocation work |
+| Private-table minor faults | 13,807.5 | 35,896 | Artifact + anonymous accesses |
+| Extension initialization elapsed | 0.814 s | 0.911 s | Far smaller time ratio than fault ratio |
+| Extension initialization minor faults | 2,450.5 | 52,215 | About 21 times as many |
+| First persistent marking minor faults | 20,643 | 20,643 | Unchanged |
+
+Fractional fault counts in the table are medians of an even number of integer
+observations. Raw stock pair timings are:
+
+| Pair | Execution order | Default s | Disabled s | Disabled/default |
+|---|---|---:|---:|---:|
+| 1 | default, disabled | 3.302 | 3.514 | 1.064 |
+| 2 | disabled, default | 3.299 | 3.503 | 1.062 |
+| 3 | default, disabled | 3.312 | 3.533 | 1.067 |
+| 4 | disabled, default | 3.259 | 3.499 | 1.074 |
+
+The paired finalization time ratios range from 0.990 to 1.195; the first default
+phase run is slower than later repeats. The stock result is consistent across
+all four pairs, but this batch does not justify assigning an exact fraction of
+the stock slowdown to each instrumented phase. Disabling THP can affect fault
+frequency, clearing, TLB behavior and memory footprint, so the 0.21 s is the net
+intervention cost rather than a measurement of fault-service time alone.
+
+### Direct target huge-page evidence
+
+The separate target
+[`smaps_rollup`](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
+censuses show approximately 28 MiB of anonymous huge pages after load,
+118 MiB after private tables, 200 MiB before extension initialization,
+398 MiB after it, and 396 MiB at the end of finalization. Both default censuses
+agree on those huge-page totals. Disabled censuses have **zero** at every point.
+
+At finalization end, total anonymous resident memory is approximately 410 MiB
+with default THP and 379 MiB disabled. These are resident snapshots, not a count
+of bytes ever allocated or touched. In particular they cannot be used to infer
+Mac allocation churn by dividing its zero-fill count by Linux resident bytes.
+The eight census reads themselves cost 0.329–0.339 s per process; excluding them
+from the timing experiment was necessary.
+
+### Address attribution and tracing disturbance
+
+All four traces reconcile exactly with every measured phase counter. They still
+observe all 37,687 artifact mmap attempts and the same requested bytes. Three
+traces have no fallback copies; the second disabled trace has three mapping
+failures and falls back to copying 417,832 bytes (see its raw I/O record).
+During private-table construction:
+
+| Address class | Default trace 1 | Default trace 2 | Disabled trace 1 | Disabled trace 2 |
+|---|---:|---:|---:|---:|
+| Artifact-backed faults | 13,735 | 13,735 | 13,735 | 13,735 |
+| Anonymous faults | 97 | 97 | 22,161 | 22,161 |
+
+This directly localizes the extra faults to anonymous allocation. Extension
+initialization likewise has 1,465 artifact-backed faults in every trace, while
+its anonymous count increases with THP disabled. The private-table artifact
+fault discrepancy previously observed between Linux and Mac survives this
+intervention; it needs a separate explanation, such as file fault-around.
+
+The default traces are **not representative of untraced fault totals**:
+extension initialization has 38,730/22,494 anonymous faults in the two default
+traces, versus 50,399 in each disabled trace. The default untraced phase runs
+have only 2,385–2,657 *total* extension faults. Host VM counters provide a
+specific clue:
+
+| Run class | Host THP fault allocations | Host THP fault fallbacks |
+|---|---:|---:|
+| Each untraced default phase repeat | 202 | 0 |
+| Default trace 1 | 125 | 77 |
+| Default trace 2 | 158 | 44 |
+
+Successful allocations plus fallbacks remain 202. This is consistent with
+failed huge-page allocations explaining the traced default's extra anonymous
+faults. The counters are host-wide, and this experiment does not identify why
+allocation failed—e.g. tracing memory allocation, fragmentation, or background
+activity. The targeted fault traces and untraced intervention remain useful,
+but their distributions must not be combined as if they came from one run.
+
+### Implications for the Mac investigation
+
+The Linux control explains why a very low anonymous-fault count need not mean
+little allocation or a special zero-copy import path. Large pages can cover
+substantial allocation with few faults. Removing that advantage makes Linux
+somewhat slower, but a 3.51 s stock import remains far below the 18–23 s Mac
+memory diagnostics in the previous batch. Those are different machines/runs,
+so this is a limit on the explanatory claim, not a decomposition of an OS-only
+ratio. The existing saved-address mmap setup cost remains separate.
+
+Next investigate the remaining artifact-fault discrepancy with a file
+fault-around control, and measure Mac allocator mapping/commit/purge lifetimes
+for its zero-fill volume. The warm CPU-heavy private-table/parser work and
+`ImportState` release still need native attribution. A faithful reduction should
+model anonymous allocation as well as artifact mappings, and record page policy
+explicitly; raw fault counts alone remain unsuitable as its performance score.

@@ -37,6 +37,8 @@ jobs:
         run: lake env python3 scripts/run-lean-thp.py --build results/rebuild --output results/thp
       - name: Validate fault address captures
         run: python3 scripts/summarize-lean-faults.py results/thp --output results/thp/fault-summary.json
+      - name: Summarize paired intervention
+        run: python3 scripts/summarize-lean-thp.py results/thp
       - uses: actions/upload-artifact@v7
         if: always()
         with:

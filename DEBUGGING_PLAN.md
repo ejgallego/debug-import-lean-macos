@@ -394,3 +394,28 @@ rise during each import, but that does not yet attribute the reduction in Linux
 fault counts. On Mac, capture allocator mapping lifetimes to distinguish fresh
 allocation from reuse after purge. Preserve the private-table/parser profiling
 and generated-C `ImportState` release experiments for the remaining CPU cost.
+
+### THP intervention result
+
+Run `34159533214` completes the process-only THP experiment on ARM Linux. The
+launcher sets the policy before exec; Lean confirms it at startup/exit. Default
+censuses show up to 398 MiB of anonymous huge pages, disabled censuses zero.
+Host policy stays unchanged and all 28 imports validate.
+
+Disabling THP raises stock minor faults from 91,471 to 186,345 (medians), while
+stock elapsed time rises from 3.300 to 3.509 s. Each of four AB/BA pairs is
+6.2–7.4% slower. Extension faults rise from about 2,450 to 52,215, but extension
+time rises only from 0.814 to 0.911 s. This explains a large allocation-fault
+count difference without explaining the Mac import-time gap.
+
+All four traces reconcile exactly with their phase counters. Private tables
+have 13,735 artifact-backed faults under either policy; anonymous faults rise
+from 97 to 22,161. Thus the remaining artifact-fault discrepancy is independent
+of this THP effect. Traced default runs also show huge-page allocation fallbacks,
+so keep their fault distributions separate from untraced timing measurements.
+
+Next: a file fault-around control for artifact access, Mac allocation/commit/purge
+lifetimes for zero-fill behavior, and focused native attribution of the remaining
+warm private-table/parser and temporary-state release costs. Preserve the
+existing mapping-order reproduction and avoid treating fault counts as a proxy
+for latency. See `repro/FINDINGS.md` for paired raw timings and caveats.
