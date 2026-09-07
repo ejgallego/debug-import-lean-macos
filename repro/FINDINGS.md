@@ -198,3 +198,135 @@ running kernel's internal path, reproduce Lean's complete access trace, or
 establish the cause of the original warm-page reclamation behavior. Next capture
 actual macOS loader outcomes and access/relocation interleaving before extending
 the C model. A descending-order Lean loader is not yet implemented or validated.
+
+## Actual Lean profiling on ARM: first import versus repeated imports
+
+Following the decision to focus on ARM macOS, the ARM-only
+[native profiling run 34126032890](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34126032890)
+at source `1853e1fb8fbafc3e5970febe53351dddb1918da7` profiles the actual Lean
+executable. The source remains `ImportMathlibModule.lean`, using the same pinned
+Lean and Mathlib. The runner is an Apple M1 virtual machine with 7 GiB RAM,
+16 KiB pages, and macOS 15.7.9. All imports and the sampler succeeded.
+
+| Run | Wall s | User CPU s | System CPU s | Major faults |
+|---|---:|---:|---:|---:|
+| First import, unprofiled | 43.785 | 5.743 | 8.996 | 118,553 |
+| Repeated import 1 | 10.500 | 3.878 | 5.905 | 74 |
+| Repeated import 2 | 9.868 | 3.679 | 5.939 | 197 |
+| Separate native-sampled import | 11.004 | 3.864 | 6.340 | 234 |
+| Repeated import 3 | 9.908 | 3.611 | 6.063 | 8 |
+
+These are direct Lean process measurements using `wait4`, excluding Lake and the
+sampling/monitoring tools. The initial cache state is whatever artifact download
+left behind; no purge or controlled cold-cache preparation was performed. Three
+repeated imports have a 9.908 s median, substantially below the earlier single
+40-second reference. The first import has approximately 29.0 seconds of wall
+time beyond total CPU time, compared with 0.23–0.72 s on repeated runs. This
+indicates waiting/descheduling; it is not a direct measurement of I/O wait.
+
+Host-wide `vm_stat` page-ins increase by 129,500 during the first import versus
+1,583–3,076 during each unprofiled repeated import. First-import compression and
+decompression deltas are 107,453 and 24,200 pages. No swap-in/out events occur.
+Together with Lean's major-fault collapse, these measurements strongly implicate
+first-use page availability in the large initial penalty, but do not prove an
+overly aggressive reclamation policy. The repeated module imports here do not
+reproduce a persistent 40-second warm slowdown.
+
+### Warm import native attribution
+
+The sampled PID is the direct Lean child. Symbols resolve through the pinned
+`libleanshared.dylib`; attachment begins about 0.2 s after launch. The sampler
+finishes normally when Lean exits. Diagnostic wall time is about 11% above the
+unprofiled median, so percentages below are approximate attribution, not exact
+baseline seconds or CPU percentages.
+
+The importing worker has 7,109 stack observations. Three other threads spend
+almost all their observations waiting for this worker or the event loop. They
+must not be added to the import denominator. The reusable
+`scripts/summarize-lean-sample.py` checks tree-count conservation and computes
+disjoint categories on the thread containing the most `importModules` samples:
+
+| Worker stack category | Samples | Share |
+|---|---:|---:|
+| Artifact `mmap` | 2,969 | 41.8% |
+| Initialize persistent extensions | 1,288 | 18.1% |
+| Other `finalizeImport`, including constant tables | 1,140 | 16.0% |
+| Mark persistent | 709 | 10.0% |
+| Filesystem calls outside `finalizeImport` | 522 | 7.3% |
+| Load extension entries | 296 | 4.2% |
+| Compacted-region reader | 31 | 0.4% |
+| Other work and waits | 154 | 2.2% |
+
+Thus roughly 48% is environment construction after loading, including extension
+initialization, constant maps, and marking. The compacted-region reader's small
+warm share gives no support for treating pointer relocation as the dominant
+remaining warm cost in this run. Ordinary memory faults can appear at the
+faulting user instruction in a stack sample, so these categories do not separate
+algorithmic CPU work from memory stalls within each operation. Internal kernel
+attribution remains unavailable.
+
+### First-import native profile and warm variability on a second runner
+
+[Follow-up run 34127346438](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34127346438)
+at source `190a52b` profiles both the initial and warm imports on another fresh
+ARM runner, with identical pinned inputs. Both sampler PIDs match their direct
+Lean children, attachment begins within 0.23 s of launch, all symbols resolve
+well enough to identify the import worker, and all processes succeed.
+
+| Run | Wall s | User CPU s | System CPU s | Major faults |
+|---|---:|---:|---:|---:|
+| Initial import, sampled | 61.539 | 8.024 | 15.343 | 118,771 |
+| Repeated import 1 | 11.871 | 4.246 | 6.772 | 265 |
+| Repeated import 2 | 27.724 | 9.395 | 13.099 | 318 |
+| Separate warm sampled import | 19.708 | 5.906 | 9.559 | 1 |
+| Repeated import 3 | 12.743 | 4.754 | 6.505 | 23 |
+
+The first import again has about 119,000 major faults and considerable wall time
+beyond CPU time (38.2 s). Its import worker has 41,378 observations:
+
+| Worker stack category | Initial import | Warm import on same runner |
+|---|---:|---:|
+| Other `finalizeImport`, including constant tables | 30.6% | 13.5% |
+| Filesystem calls outside `finalizeImport` | 24.3% | 9.3% |
+| Artifact `mmap` | 13.2% | 48.6% |
+| Mark persistent | 11.0% | 8.3% |
+| Load extension entries | 7.7% | 3.2% |
+| Initialize persistent extensions | 7.4% | 12.6% |
+| Compacted-region reader | 0.3% | 1.0% |
+| Other work and waits | 5.5% | 3.5% |
+
+First-import `read` leaves account for 7,246 observations, almost all under
+`lean_compacted_region_read`. The profile does not directly distinguish header
+reads from full-file fallback reads. Other first-import hot leaves are the
+constant-table loop `Lean_finalizeImport_spec__6` (7,973), `lean_mark_persistent`
+(4,539), and the extension-entry loop (2,542). The constant/extension categories
+include memory access to mapped data as well as ordinary CPU work; do not
+interpret them as pure algorithmic overhead. Around 57% of initial observations
+are under environment construction, versus 38% in this runner's warm profile.
+The large first-import penalty therefore reaches well beyond the mmap syscall.
+
+The initial sampled time cannot be compared directly with the previous runner's
+unprofiled first time to estimate profiler overhead: these are different VMs and
+initial cache states. The second runner also has a real unprofiled warm outlier
+at 27.7 s. Its major faults remain low, while user and system CPU roughly double
+relative to its first repeated import. Host-wide compression/decompression and
+page-ins increase, but are not specific to Lean. These observations leave
+runner/memory-state variability unresolved; major file faults alone do not
+explain every slow warm run. No kernel reclamation policy has been established.
+
+### Consequences for the next experiment
+
+Keep first-use and repeated-import results separate. Across these profiles,
+mapping calls account for roughly 42–49% of warm worker observations and
+environment construction for roughly 38–48%. The first-use penalty has high
+major-fault counts and appears in loader reads and later imported-data access.
+The earlier single 40-second reference must not be treated as the steady warm
+baseline or have an unrelated C mapping time subtracted from it.
+
+The next C fidelity improvement should preserve Lean's sparse, interleaved page
+accesses and finalization access order, rather than sweeping every mapped page.
+First collect actual loader mapping/fallback timings and phase boundaries to
+distinguish the warm outlier's mapping cost from finalization cost. Reproduce
+cache loss under a controlled intervening workload before claiming aggressive
+warm-page eviction. These ARM results concern the module-system consumer;
+legacy imports and the original laptop conditions still need their own checks.

@@ -299,3 +299,24 @@ The descending-order experiment is a diagnostic intervention in the C replay.
 Applying it to Lean requires preserving dependency and relocation semantics.
 Keep the mapping-setup bottleneck distinct from repeated warm-page faults until
 the measurements connect them. Defer packaging while resolving these questions.
+
+### ARM native-profile update
+
+Further experiments now focus only on ARM macOS. Native profiles of the direct
+Lean module import distinguish an initial import with about 119,000 major faults
+from immediate repeats with very few major faults. One runner repeats in about
+10 s; another varies from 11.9 to 27.7 s, including a slow run without a major-fault
+spike. See `repro/FINDINGS.md` for the raw-run links and qualifications.
+
+Warm profiles put about 42–49% of the import worker's observations in artifact
+mmap calls and 38–48% in environment construction. First-import observations
+shift strongly toward loader reads and later access to imported objects. Small
+compacted-region-reader shares do not support relocation as the main warm
+hotspot in these profiles. These are stack-sampling proportions, not direct
+phase timers or internal kernel attribution.
+
+Next measure actual loader mapping/fallback time and import/finalization phase
+boundaries, especially in a slow warm outlier. Use observed sparse access order
+to extend the C replay. Test cache loss with a controlled intervening workload;
+the data so far do not establish an aggressive reclamation policy and do not
+justify treating a first-use import as the steady warm baseline.

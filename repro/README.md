@@ -192,6 +192,17 @@ metrics, diagnostic timelines, host-wide VM snapshots, and input identities.
 Check PID, symbols, coverage, tool exits, and diagnostic overhead before deriving
 attribution. Use `--no-sample` for a local Linux functional control.
 
+Summarize a downloaded profile with:
+
+```sh
+python3 scripts/summarize-lean-sample.py results/lean-arm-profile/sampled.sample.txt
+```
+
+The summary checks call-tree count conservation and selects the thread containing
+the most `importModules` observations. Its disjoint categories exclude other
+threads' idle observations from the denominator. Counts are stack observations,
+not exact seconds or CPU-only percentages; retain and inspect the raw call tree.
+
 ## Initial local control
 
 The first local Linux check mapped all 37,687 regions (7,303,535,912 file bytes)
