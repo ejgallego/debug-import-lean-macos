@@ -1,0 +1,149 @@
+name: C mmap experiment
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Lean import case used to capture the mapping sequence
+        type: choice
+        options:
+          - ImportMathlibModule.lean
+          - ImportMathlib.lean
+        default: ImportMathlibModule.lean
+      repeats:
+        description: Fresh processes per address mode (1 to 10)
+        default: "2"
+  push:
+    branches:
+      - experiments/mmap-replay
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mmap-experiment-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  LEAN_NUM_THREADS: "1"
+  EXPERIMENT_SOURCE: ${{ inputs.source || 'ImportMathlibModule.lean' }}
+  EXPERIMENT_REPEATS: ${{ inputs.repeats || '2' }}
+
+jobs:
+  capture:
+    name: Capture and replay (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned Lean
+        uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: false
+      - name: Download pinned Mathlib artifacts
+        run: lake exe cache get
+      - name: Install strace
+        run: |
+          if ! command -v strace; then
+            sudo apt-get update
+            sudo apt-get install -y strace
+          fi
+      - name: Capture direct Lean mapping calls
+        run: |
+          mkdir -p results/mmap-capture
+          git diff --exit-code -- lean-toolchain lake-manifest.json
+          lake env strace -f -yy -s 4096 -e trace=mmap,munmap \
+            -o results/mmap-capture/lean.strace lean "$EXPERIMENT_SOURCE"
+          cp lean-toolchain lake-manifest.json results/mmap-capture/
+          python3 scripts/mapping-files.py results/mmap-capture/lean.strace \
+            > results/mmap-capture/files-linux.txt
+      - name: Publish mapping sequence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mmap-capture
+          path: results/mmap-capture/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Build C experiment
+        run: |
+          mkdir -p results/mmap-linux
+          cc -O2 -g -std=c11 -Wall -Wextra -Werror repro/mmap-replay.c \
+            -o results/mmap-linux/mmap-replay
+      - name: Run Linux controls
+        run: |
+          python3 scripts/run-mmap-experiment.py \
+            --trace results/mmap-capture/lean.strace \
+            --source "$EXPERIMENT_SOURCE" --repeats "$EXPERIMENT_REPEATS" \
+            --output results/mmap-linux
+      - name: Publish Linux results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mmap-linux
+          path: results/mmap-linux/
+          if-no-files-found: warn
+          retention-days: 30
+
+  macos:
+    name: Replay (${{ matrix.platform }})
+    needs: capture
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-intel
+            runner: macos-15-intel
+          - platform: macos-arm
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: mmap-capture
+          path: results/mmap-capture
+      - name: Require identical pinned inputs
+        run: |
+          cmp lean-toolchain results/mmap-capture/lean-toolchain
+          cmp lake-manifest.json results/mmap-capture/lake-manifest.json
+      - name: Install pinned Lean
+        uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: false
+      - name: Download pinned Mathlib artifacts
+        run: |
+          lake exe cache get
+          git diff --exit-code -- lean-toolchain lake-manifest.json
+      - name: Build C experiment
+        env:
+          EXPERIMENT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir -p "results/mmap-$EXPERIMENT_PLATFORM"
+          cc -O2 -g -std=c11 -Wall -Wextra -Werror repro/mmap-replay.c \
+            -o "results/mmap-$EXPERIMENT_PLATFORM/mmap-replay"
+      - name: Run macOS experiments
+        env:
+          EXPERIMENT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/run-mmap-experiment.py \
+            --trace results/mmap-capture/lean.strace \
+            --source "$EXPERIMENT_SOURCE" --repeats "$EXPERIMENT_REPEATS" \
+            --output "results/mmap-$EXPERIMENT_PLATFORM"
+      - name: Publish macOS results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mmap-${{ matrix.platform }}
+          path: results/mmap-${{ matrix.platform }}/
+          if-no-files-found: warn
+          retention-days: 30
