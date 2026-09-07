@@ -2,7 +2,27 @@
 
 `mmap-replay.c` is a standalone starting point for reproducing the VM behavior.
 It requires a C compiler and Lean artifact files, but does not link or run Lean.
-It is not yet a confirmed macOS reproducer: only Linux execution has been tested.
+CI has exercised it on Linux and Intel/ARM macOS. It exposes expensive hinted
+mapping on Intel and working-set thrashing on the small ARM runner; connecting
+those effects to the original Lean issue still needs investigation. See
+[FINDINGS.md](FINDINGS.md) for the evidence and its limits.
+
+The next reduction, `mmap-hints.c`, runs without any Lean files:
+
+```sh
+mkdir -p results/hints
+cc -O2 -g -std=c11 -Wall -Wextra -Werror repro/mmap-hints.c -o results/hints/mmap-hints
+results/hints/mmap-hints 32768 1073741824 shuffled file
+results/hints/mmap-hints 32768 1073741824 ascending file
+results/hints/mmap-hints 32768 65536 any file
+```
+
+It maps one page repeatedly with no page access. Arguments are count, address
+spacing in bytes, order (`any`, `ascending`, `descending`, `shuffled`), and backing
+(`file`, `anon`). Run `python3 scripts/run-mmap-hints.py --output results/hints`
+for the count/order/spacing controls. Pushes to `experiments/mmap-hints` run the
+standalone experiment on Linux and both macOS architectures without downloading
+Lean or Mathlib. The full artifact replay remains on `experiments/mmap-replay`.
 
 The initial question is whether Lean's many file mappings and a simple page-access
 pattern suffice to produce repeated expensive faults on macOS. If they do, shrink

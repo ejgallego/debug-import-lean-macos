@@ -1,0 +1,41 @@
+name: Minimal mmap hints
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiments/mmap-hints]
+permissions:
+  contents: read
+concurrency:
+  group: mmap-hints-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  hints:
+    name: Hints (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+          - platform: macos-intel
+            runner: macos-15-intel
+          - platform: macos-arm
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build standalone C experiment
+        run: |
+          mkdir -p results/hints
+          cc -O2 -g -std=c11 -Wall -Wextra -Werror repro/mmap-hints.c -o results/hints/mmap-hints
+      - name: Vary mapping count, insertion order, spacing, and backing
+        run: python3 scripts/run-mmap-hints.py --output results/hints
+      - name: Preserve raw results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hints-${{ matrix.platform }}
+          path: results/hints/
+          if-no-files-found: warn
+          retention-days: 30
