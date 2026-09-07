@@ -134,5 +134,16 @@ experiment should overwrite occupied mappings.
 
 Keep the original warm-page problem separate: this experiment establishes a
 mapping-order cost without accessing data pages. It explains a concrete macOS
-mmap bottleneck and a substantial part of the C replay's mapping phase; it does
+mmap bottleneck that could account for much of the C replay's mapping phase; it does
 not yet explain all of Lean's import time or prove the earlier reclamation cause.
+
+The artifact-order comparison is implemented by `--suite order` in
+`scripts/run-mmap-experiment.py` and is now the CI workflow's default. It changes
+mapping creation order while retaining the full artifact list, per-file loader
+operations, sizes, requested addresses, protections, and platform flags. It omits
+synthetic page passes to avoid the small ARM runner's working-set confound.
+Linux locally passes both orders with no fallback; permutation validation,
+checksum preservation with page passes enabled, and address-collision fallback
+have also been checked. macOS results will determine whether the small reduction
+predicts the real-artifact mapping cost. Neither order yet models Lean's
+interleaved pointer accesses, relocation writes, or heap activity.

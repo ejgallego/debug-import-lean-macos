@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 #define _DARWIN_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -182,16 +183,19 @@ static int positive(const char *s) {
 
 int main(int argc, char **argv) {
     int passes = 3, cycles = 1, saved = 1, probe = 0, writes = 0;
-    const char *manifest = NULL;
+    int map_only = 0;
+    const char *manifest = NULL, *order_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--passes") && i + 1 < argc) passes = positive(argv[++i]);
         else if (!strcmp(argv[i], "--cycles") && i + 1 < argc) cycles = positive(argv[++i]);
         else if (!strcmp(argv[i], "--any-address")) saved = 0;
         else if (!strcmp(argv[i], "--residency")) probe = 1;
         else if (!strcmp(argv[i], "--write")) writes = 1;
+        else if (!strcmp(argv[i], "--map-only")) map_only = 1;
+        else if (!strcmp(argv[i], "--map-order") && i + 1 < argc) order_path = argv[++i];
         else if (argv[i][0] != '-' && !manifest) manifest = argv[i];
         else fail("usage: mmap-replay [--passes N] [--cycles N] [--any-address] "
-                  "[--residency] [--write] FILES.txt");
+                  "[--residency] [--write] [--map-only] [--map-order INDICES.txt] FILES.txt");
     }
     if (!manifest) fail("missing FILES.txt (one compacted artifact path per line)");
     uint16_t endian = 1;
@@ -225,8 +229,32 @@ int main(int argc, char **argv) {
     if (fclose(f)) die("close manifest");
     free(line);
     if (!count) fail("empty manifest");
-    printf("config,page_size,%zu,files,%zu,passes,%d,cycles,%d,saved_address,%d,write,%d,probe,%d\n",
-           page_size, count, passes, cycles, saved, writes, probe);
+    /* Reorder only mapping creation. Access, probes, and teardown still use rs
+     * in captured order. The permutation is prepared outside this process so
+     * sorting does not introduce extra artifact reads into the replay trace. */
+    region **mapping_order = allocate(count * sizeof(*mapping_order));
+    for (size_t i = 0; i < count; i++) mapping_order[i] = &rs[i];
+    if (order_path) {
+        FILE *order_file = fopen(order_path, "r");
+        if (!order_file) die(order_path);
+        unsigned char *seen = allocate(count);
+        memset(seen, 0, count);
+        for (size_t i = 0; i < count; i++) {
+            size_t index;
+            if (fscanf(order_file, "%zu", &index) != 1 || index >= count || seen[index])
+                fail("map order must be a permutation of all zero-based manifest indices");
+            seen[index] = 1;
+            mapping_order[i] = &rs[index];
+        }
+        int ch;
+        do { ch = fgetc(order_file); } while (ch != EOF && isspace((unsigned char)ch));
+        if (ch != EOF || ferror(order_file)) fail("extra/invalid map-order data");
+        if (fclose(order_file)) die("close map order");
+        free(seen);
+    }
+    printf("config,page_size,%zu,files,%zu,passes,%d,cycles,%d,saved_address,%d,write,%d,probe,%d,map_only,%d,map_order,%s\n",
+           page_size, count, passes, cycles, saved, writes, probe, map_only,
+           order_path ? "external" : "captured");
     puts("# phase,name,cycle,pass,wall_s,user_s,system_s,minor_faults,major_faults,checksum");
     puts("# mappings,cycle,mapped,syscall_failed,wrong_address,total_bytes,fallback_bytes");
     puts("# residency,cycle,pass,mapped_pages,resident,lost_since_probe,gained_since_probe");
@@ -236,11 +264,12 @@ int main(int argc, char **argv) {
         uint64_t bytes = 0, fallback_bytes = 0;
         stamp a = now();
         for (size_t i = 0; i < count; i++) {
-            int outcome = load(&rs[i], saved);
+            region *r = mapping_order[i];
+            int outcome = load(r, saved);
             outcomes[outcome]++;
-            bytes += rs[i].size;
-            if (outcome) fallback_bytes += rs[i].size;
-            if (rs[i].pages > max_pages) max_pages = rs[i].pages;
+            bytes += r->size;
+            if (outcome) fallback_bytes += r->size;
+            if (r->pages > max_pages) max_pages = r->pages;
         }
         stamp b = now();
         report("map", c, 0, a, b);
@@ -258,7 +287,7 @@ int main(int argc, char **argv) {
             }
             residency(rs, count, scratch, c, 0);
         }
-        for (int p = 1; p <= passes; p++) {
+        for (int p = 1; !map_only && p <= passes; p++) {
             a = now();
             for (size_t i = 0; i < count; i++) touch(&rs[i], writes);
             b = now();
@@ -280,6 +309,7 @@ int main(int argc, char **argv) {
         free(scratch);
     }
     for (size_t i = 0; i < count; i++) free(rs[i].path);
+    free(mapping_order);
     free(rs);
     return 0;
 }

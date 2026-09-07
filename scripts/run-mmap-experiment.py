@@ -55,18 +55,26 @@ def memory_snapshot(output: Path, label: str) -> None:
 
 
 def summary(output: Path, records: list[dict], metadata: dict) -> None:
+    method = (
+        "Mapping-only comparison: identical artifacts, saved addresses, and flags; "
+        "captured versus descending saved-address insertion order. Two map/unmap "
+        "cycles per process, reversed case order on alternate repetitions. "
+        "No page-access loop; rejected hints still take Lean's allocation/read fallback."
+        if metadata.get("suite") == "order" else
+        "Each C process retains its mappings for three page-access passes, then remaps "
+        "for a second cycle. Address modes alternate order between repetitions. "
+        "Residency and sampled runs are separate diagnostics. No cache purge is used."
+    )
     lines = ["# C mmap experiment", "",
              f"{metadata['system']} {metadata['release']}, {metadata['machine']}; "
              f"page size {metadata['page_size']}; RAM {metadata['memory_bytes'] / 2**30:.1f} GiB.",
              f"Lean: `{metadata['lean']}`; Mathlib: `{metadata['mathlib']}`.", "",
-             "Each C process retains its mappings for three page-access passes, then remaps "
-             "for a second cycle. Address modes alternate order between repetitions. "
-             "Residency and sampled runs are separate diagnostics. No cache purge is used.", "",
+             method, "",
              "| Process | Exit | Wall s | Cycle | Map s | Access 1 s | Access 2 s | Access 3 s | Unmap s |",
              "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for record in records:
         cycles: dict[str, dict[str, str]] = {}
-        if record["name"].startswith(("saved-", "any-", "residency")):
+        if record["name"] != "lean-reference":
             for row in csv.reader((output / record["stdout"]).open()):
                 if len(row) == 10 and row[0] == "phase":
                     key = f"touch-{row[3]}" if row[1] == "touch" else row[1]
@@ -92,6 +100,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument("--suite", choices=["placement", "order"], default="placement")
     args = parser.parse_args()
     if not 1 <= args.repeats <= 10 or not 0 < args.timeout <= 600:
         parser.error("repeats must be 1..10 and timeout must be in (0, 600]")
@@ -122,6 +131,7 @@ def main() -> int:
         "toolchain": Path("lean-toolchain").read_text().strip(),
         "source_commit": capture(["git", "rev-parse", "HEAD"]),
         "source": args.source, "repeats": args.repeats, "timeout": args.timeout,
+        "suite": args.suite,
         "compiler": capture(["cc", "--version"]), "binary_sha256": sha256(binary),
         "c_source_sha256": sha256(Path("repro/mmap-replay.c")),
         "capture_sha256": sha256(args.trace), "manifest_sha256": sha256(manifest),
@@ -130,6 +140,22 @@ def main() -> int:
                         ["LEAN_NUM_THREADS", "RUNNER_NAME", "RUNNER_ARCH", "ImageOS", "ImageVersion",
                          "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]},
     }
+    descending = output / "descending-order.txt"
+    if args.suite == "order":
+        inventory = []
+        for index, path in enumerate(paths):
+            with path.open("rb") as stream:
+                header = stream.read(88)
+            if len(header) != 88 or header[:5] != b"olean" or header[5] not in (2, 3):
+                raise RuntimeError(f"unexpected compacted header: {path}")
+            inventory.append({"index": index, "path": str(path), "size": path.stat().st_size,
+                              "saved_address": int.from_bytes(header[80:88], "little")})
+        # Stable ties keep duplicate addresses in their captured relative order.
+        ordered = sorted(inventory, key=lambda r: -r["saved_address"])
+        descending.write_text("".join(f"{r['index']}\n" for r in ordered))
+        (output / "inventory.json").write_text(json.dumps(inventory, indent=2) + "\n")
+        metadata["descending_order_sha256"] = sha256(descending)
+        metadata["order_preparation"] = "read destination headers once before any timed process"
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     records = []
 
@@ -148,6 +174,14 @@ def main() -> int:
 
     # A real Lean reference first both confirms the workload and supplies a warmup.
     run("lean-reference", ["lake", "env", "lean", args.source])
+    if args.suite == "order":
+        base = [str(binary), "--map-only", "--cycles", "2"]
+        for repeat in range(1, args.repeats + 1):
+            modes = [("captured", []), ("descending", ["--map-order", str(descending)])]
+            for mode, flags in modes if repeat % 2 else reversed(modes):
+                run(f"{mode}-{repeat}", [*base, *flags, str(manifest)])
+        print((output / "summary.md").read_text(), flush=True)
+        return 1 if any(r["exit_code"] != 0 for r in records) else 0
     base = [str(binary), "--passes", "3", "--cycles", "2"]
     for repeat in range(1, args.repeats + 1):
         modes = [("saved", []), ("any", ["--any-address"])]

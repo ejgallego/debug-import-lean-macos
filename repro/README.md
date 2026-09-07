@@ -96,6 +96,12 @@ process-exit costs require an external timer or trace; they are not in `unmap`.
 Controls, to run separately:
 
 - `--any-address`: let the kernel choose the mapping address.
+- `--map-only`: omit page-access passes, retaining the loader's header reads and
+  any full-file copy fallback. This isolates mapping setup without touching the
+  entire mapped working set.
+- `--map-order INDICES.txt`: create mappings in the supplied permutation of
+  zero-based manifest indices. Every index must occur exactly once. Access,
+  residency probes, and teardown still follow the original manifest order.
 - `--write`: write the same byte back once per page, inducing private writes
   without modifying the backing files. This approximates COW activity, not Lean's
   relocation algorithm.
@@ -121,11 +127,29 @@ and a corresponding native/kernel profile or residency signature.
 The `C mmap experiment` workflow captures a Linux module import, then runs the
 C replay on Linux, Intel macOS 15, and ARM macOS 15. It uses the checked-in
 `lean-toolchain` and `lake-manifest.json`; it does not advance the nightly.
-Pushes to `experiments/mmap-replay` trigger the experiment. The workflow also
-defines manual dispatch with an import-case choice and repetition count; GitHub
+Pushes to `experiments/mmap-replay` or `experiments/mmap-artifact-order` trigger
+the experiment. The workflow also defines manual dispatch with an import-case
+choice, repetition count, and suite (`order` or `placement`); GitHub
 requires the workflow on the default branch to enable manual dispatch there.
 
-Each host runs a real Lean import, two order-balanced repetitions of saved-address
+The default `order` suite runs a real Lean import followed by two order-balanced
+repetitions comparing captured order with descending saved-address order. Each C
+process performs two map/unmap cycles with no page-access loop. The runner reads
+headers before the timed processes to prepare a stable permutation, preserving
+the relative order of equal addresses. It records the permutation and an artifact
+inventory. The C loader itself still opens, stats, reads each header, maps, and
+closes each file. Check fallback counts and bytes: overlapping ranges can cause
+different mappings to be rejected when creation order changes.
+
+Run this suite locally after compiling the binary into the output directory:
+
+```sh
+env LEAN_NUM_THREADS=1 python3 scripts/run-mmap-experiment.py \
+  --trace results/mmap-repro/lean-direct.strace \
+  --source ImportMathlibModule.lean --output results/mmap-repro --suite order
+```
+
+The `placement` suite runs a real Lean import, two order-balanced repetitions of saved-address
 and kernel-selected-address C processes, then a separate residency run. Each C
 process makes three access passes per cycle and two map/unmap cycles. Individual
 processes have a five-minute timeout. macOS also attempts a separate `sample`
