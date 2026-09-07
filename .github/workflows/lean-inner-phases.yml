@@ -1,0 +1,68 @@
+name: Real Lean inner phase timings
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiments/lean-inner-phases]
+permissions:
+  contents: read
+concurrency:
+  group: lean-inner-phases-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  inner:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            label: macos-arm64
+          - runner: ubuntu-24.04-arm
+            label: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      LEAN_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux C++ headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libc++-18-dev
+      - name: Install pinned Lean
+        uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: false
+      - name: Download pinned artifacts and source
+        run: |
+          lake exe cache get
+          git diff --exit-code -- lean-toolchain lake-manifest.json
+          mkdir -p results/source results/inner
+          curl -fsSL https://codeload.github.com/leanprover/lean4/tar.gz/58774429865502f05c63239266aac30ef1e91ef7 -o results/source.tar.gz
+          tar -xzf results/source.tar.gz -C results/source --strip-components=1
+      - name: Build control and instrumented Lean
+        run: python3 scripts/build-lean-inner.py --source results/source --output results/rebuild
+      - name: Build artifact-call validation library
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            cc -O2 -g -std=c11 -Wall -Wextra -Werror -dynamiclib repro/lean-io-timing.c -o results/inner/lean-io-timing.dylib
+          else
+            cc -O2 -g -std=c11 -Wall -Wextra -Werror -shared -fPIC repro/lean-io-timing.c -ldl -o results/inner/lean-io-timing.so
+          fi
+      - name: Measure stock, control, and internal phases
+        run: lake env python3 scripts/run-lean-inner.py --build results/rebuild --output results/inner
+      - name: Publish raw measurements and rebuild evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lean-inner-${{ matrix.label }}
+          path: |
+            results/inner/
+            results/rebuild/build.json
+            results/rebuild/Environment.patch
+            results/rebuild/*.c
+          if-no-files-found: warn
+          retention-days: 30

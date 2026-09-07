@@ -294,3 +294,63 @@ bootstrap only for allocator activity before constructors. The pinned Linux
 binary's `__fxstat` entry point is covered. Injecting a library can still alter
 address collisions. Compare the adjacent uninstrumented controls; different CI
 hardware and RAM prevent interpreting host ratios as a pure OS effect.
+
+## Real Lean finalization substeps without a debugger
+
+The `lean-inner-phases.yml` experiment rebuilds `Lean.Environment` from the pinned
+source, compiles the pinned C++ shell, and links them with the release's native
+archives. It creates an unmodified relinked control and an instrumented relink.
+Both use the normal Lean frontend and the original `.olean`/IR files. A sibling
+`lib` symlink supplies the original toolchain library path. The stock release
+binary remains a separate control. This avoids rebuilding Mathlib and does not
+change saved-address mapping policy.
+
+The instrumenter refuses missing or duplicate source anchors. It brackets:
+
+- Loading, and finalization as a whole.
+- Module preparation and constant-count calculation.
+- Private constant/name-to-module tables, including allocation of all three hash
+  tables; then population of the public table.
+- Initial extension states, base environment assembly, and imported entries for
+  the private, IR, and server views.
+- Persistent marking before extension initialization and after it.
+- Extension initialization as a whole, each named extension, and the nested
+  execution of `[init]` attributes.
+
+Extension spans include `addImportedFn`, state installation, and any registry
+expansion/attribute updates. They are not pure `addImportedFn` timings.
+The logger records monotonic wall time and `getrusage(RUSAGE_SELF)` user/kernel
+CPU, minor/major faults, input blocks, and context switches at each boundary.
+Events stay in a bounded memory buffer until process exit. The summary validates
+nesting, complete stage coverage, nonnegative counters, and workload cardinalities;
+it emits both inclusive and child-subtracted exclusive values. Do not add nested
+spans. Sampling resolution and OS fault semantics still apply.
+
+On ARM macOS, starting from this pinned repository:
+
+```sh
+lake exe cache get
+mkdir -p results/inner-source results/inner
+curl -fsSL https://codeload.github.com/leanprover/lean4/tar.gz/58774429865502f05c63239266aac30ef1e91ef7 \
+  -o results/inner-source.tar.gz
+tar -xzf results/inner-source.tar.gz -C results/inner-source --strip-components=1
+python3 scripts/build-lean-inner.py --source results/inner-source --output results/inner-build
+cc -O2 -g -std=c11 -Wall -Wextra -Werror -dynamiclib repro/lean-io-timing.c \
+  -o results/inner/lean-io-timing.dylib
+LEAN_NUM_THREADS=1 lake env python3 scripts/run-lean-inner.py \
+  --build results/inner-build --output results/inner
+```
+
+Linux additionally needs clang and libc++ headers (Ubuntu 24.04:
+`sudo apt-get install clang libc++-18-dev`). Build the validation library with
+`-shared -fPIC -ldl` and suffix `.so`. `--libcxx-include` can point the build script
+at separately extracted libc++ headers. Use fresh output directories.
+
+The suite records initial runs separately, then balances stock/control/diagnostic
+order across three passes. It also runs the diagnostic binary with logging off,
+and checks artifact-call counts for all three binaries in separate I/O diagnostics.
+The phase measurements themselves use neither a debugger nor a preload library.
+Build commands, source patch, generated C, archive/binary hashes, machine details,
+raw snapshots, and whole-process `wait4` measurements are retained. Changes in
+linkage, compiler code shape, and allocation remain possible confounders; compare
+the relinked and stock controls before treating phase timings as representative.
