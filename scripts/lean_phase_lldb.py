@@ -5,6 +5,7 @@ from pathlib import Path
 import struct
 import time
 import lldb
+from process_usage import usage
 
 NAMES = ['open_count', 'open_ns', 'header_read_count', 'header_read_ns', 'header_read_bytes',
          'mmap_count', 'mmap_ns', 'mmap_bytes', 'mmap_failed', 'mmap_wrong_address',
@@ -83,6 +84,7 @@ def run(debugger, spec_path):
                 event = {'phase': entries[bp_id], 'thread_id': thread.GetThreadID(),
                          'pid': process.GetProcessID(), 'entry_ns': stopped_ns,
                          'entry_counters': counters(process), 'return_address': caller.GetPC()}
+                event['entry_usage'] = usage(process.GetProcessID(), spec)
                 returns[bp.GetID()] = event
                 events.append(event)
                 save()
@@ -94,6 +96,12 @@ def run(debugger, spec_path):
                 event['return_ns'] = stopped_ns
                 event['wall_seconds'] = (stopped_ns-event['resume_ns'])/1e9
                 event['return_counters'] = counters(process)
+                event['return_usage'] = usage(process.GetProcessID(), spec)
+                event['usage_delta'] = {k:v-event['entry_usage'][k]
+                                        for k,v in event['return_usage'].items()
+                                        if k not in ('backend', 'clock_resolution_ns')}
+                if any(v < 0 for k,v in event['usage_delta'].items() if k != 'resident_bytes'):
+                    raise RuntimeError('non-monotonic process resource counter')
                 event['counter_delta'] = {k:event['return_counters'][k]-event['entry_counters'][k] for k in NAMES}
                 event['return_handler_ns'] = time.monotonic_ns()-stopped_ns
                 save()

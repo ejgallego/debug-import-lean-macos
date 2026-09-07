@@ -1,0 +1,63 @@
+name: Real Lean platform phase timings
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiments/lean-platform-phases]
+permissions:
+  contents: read
+concurrency:
+  group: lean-platform-phases-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  phases:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            label: macos-arm64
+          - runner: ubuntu-24.04
+            label: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            label: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      LEAN_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux debugger
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y lldb
+      - name: Install pinned Lean
+        uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: false
+      - name: Download pinned artifacts
+        run: |
+          lake exe cache get
+          git diff --exit-code -- lean-toolchain lake-manifest.json
+      - name: Build passive timers and external observer
+        shell: bash
+        run: |
+          mkdir -p results/phases
+          if [ "$RUNNER_OS" = macOS ]; then
+            cc -O2 -g -std=c11 -Wall -Wextra -Werror -dynamiclib repro/lean-io-timing.c -o results/phases/lean-io-timing.dylib
+            cc -O2 -g -std=c11 -Wall -Wextra -Werror repro/process-usage.c -o results/phases/process-usage
+          else
+            cc -O2 -g -std=c11 -Wall -Wextra -Werror -shared -fPIC repro/lean-io-timing.c -ldl -o results/phases/lean-io-timing.so
+          fi
+      - name: Measure real Lean loading and finalization
+        run: lake env python3 scripts/run-lean-phases.py --output results/phases
+      - name: Publish diagnostics and controls
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lean-phases-${{ matrix.label }}
+          path: results/phases/
+          if-no-files-found: warn
+          retention-days: 30

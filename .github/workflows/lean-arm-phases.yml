@@ -33,6 +33,7 @@ jobs:
           mkdir -p results/lean-arm-phases
           cc -O2 -g -std=c11 -Wall -Wextra -Werror -dynamiclib \
             repro/lean-io-timing.c -o results/lean-arm-phases/lean-io-timing.dylib
+          cc -O2 -g -std=c11 -Wall -Wextra -Werror repro/process-usage.c -o results/lean-arm-phases/process-usage
       - name: Measure loading and finalization
         run: lake env python3 scripts/run-lean-phases.py --output results/lean-arm-phases
       - name: Publish diagnostics and controls

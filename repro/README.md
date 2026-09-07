@@ -243,3 +243,51 @@ Lean and C confirmed the same artifact mmap request sequence: addresses, lengths
 protections, flags, paths, and offsets. Repeated passes through unchanged
 mappings were about 0.02 seconds after a roughly 0.4-second first pass. This is
 a functional control, not macOS evidence or a comparison with CI hardware.
+
+### Cross-platform real Lean phases
+
+`lean-platform-phases.yml` runs the same pinned `module; public import Mathlib`
+consumer on ARM macOS, ARM Linux, and x86-64 Linux. Each job runs one initial
+process, three uninstrumented warm controls, two passive syscall-timer processes,
+and three LLDB phase processes, in the same interleaved order. This is the actual
+Lean executable, not the C replay. The initial process is not a controlled cold
+cache measurement. `LEAN_NUM_THREADS=1` is set in all jobs; ASLR remains enabled.
+
+On Linux, install LLDB, then run:
+
+```sh
+mkdir -p results/platform-phases
+cc -O2 -g -std=c11 -Wall -Wextra -Werror -shared -fPIC \
+  repro/lean-io-timing.c -ldl -o results/platform-phases/lean-io-timing.so
+LEAN_NUM_THREADS=1 lake env python3 scripts/run-lean-phases.py --output results/platform-phases
+```
+
+On ARM macOS, build `lean-io-timing.dylib` with `-dynamiclib` instead of
+`-shared -fPIC -ldl`, and also build the external observer:
+
+```sh
+cc -O2 -g -std=c11 -Wall -Wextra -Werror repro/process-usage.c \
+  -o results/platform-phases/process-usage
+```
+
+The same runner command then applies. Output must be fresh. `records.json`
+contains phase wall time, user/kernel CPU, resource counter snapshots and deltas,
+and artifact syscall times. The runner checks the CPU counter units against a
+short busy loop, and validates that all 37,687 artifact operations fall inside
+loading and none inside finalization. A failed check fails the job.
+
+Linux CPU comes from `/proc/PID/stat` (clock-tick resolution, recorded in JSON).
+ARM macOS uses `proc_pidinfo(PROC_PIDTASKINFO)` with Mach timebase conversion.
+The external observer runs while Lean is stopped; its work is excluded from
+Lean's CPU and the entry-handler portion of phase wall time. Debugger transport,
+cache effects, and target breakpoint handling still affect diagnostic timings.
+Linux major/minor faults and macOS page-ins/faults/COW faults retain their native
+names and must not be treated as identical cross-OS counters. Resident-byte
+deltas are not peak memory. CPU totals cover all Lean threads. Wall minus CPU
+is a residual, not a direct disk-wait measurement.
+
+Linux wrappers forward to libc after constructor initialization, with raw syscall
+bootstrap only for allocator activity before constructors. The pinned Linux
+binary's `__fxstat` entry point is covered. Injecting a library can still alter
+address collisions. Compare the adjacent uninstrumented controls; different CI
+hardware and RAM prevent interpreting host ratios as a pure OS effect.

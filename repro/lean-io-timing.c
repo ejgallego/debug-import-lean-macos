@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #ifndef __APPLE__
+#include <dlfcn.h>
 #include <sys/syscall.h>
 #endif
 
@@ -57,15 +58,33 @@ static int artifact(const char *path) {
 __attribute__((used)) static struct { const void *replacement; const void *original; } \
 interpose_##name __attribute__((section("__DATA,__interpose"))) = { (const void *)trace_##name, (const void *)name }
 #else
-/* Linux is a functional control. Raw syscalls avoid dlsym/allocator recursion
- * before preload constructors, because Lean's allocator can mmap very early. */
-static int real_open(const char *p,int f,mode_t m) { return (int)syscall(SYS_openat,AT_FDCWD,p,f,m); }
+/* Bootstrap only: Lean's allocator can mmap before preload constructors.
+ * Once resolved, forward to the original libc entry points, like dyld on Mac. */
+static int real_open(const char *p,int f,...) {
+    va_list ap; va_start(ap,f); mode_t m=(mode_t)va_arg(ap,int); va_end(ap);
+    return (int)syscall(SYS_openat,AT_FDCWD,p,f,m);
+}
 static ssize_t real_read(int f,void *b,size_t n) { return syscall(SYS_read,f,b,n); }
 static void *real_mmap(void *a,size_t n,int p,int f,int d,off_t o) { return (void *)syscall(SYS_mmap,a,n,p,f,d,o); }
 static off_t real_lseek(int f,off_t o,int w) { return syscall(SYS_lseek,f,o,w); }
 static int real_fstat(int f,struct stat *s) { return (int)syscall(SYS_fstat,f,s); }
 static int real_close(int f) { return (int)syscall(SYS_close,f); }
-#define REAL(name) real_##name
+static int (*libc_open)(const char *, int, ...);
+static ssize_t (*libc_read)(int, void *, size_t);
+static void *(*libc_mmap)(void *, size_t, int, int, int, off_t);
+static off_t (*libc_lseek)(int, off_t, int);
+static int (*libc_fstat)(int, struct stat *);
+static int (*libc_close)(int);
+static int (*libc_fxstat)(int, int, struct stat *);
+static _Atomic int resolved;
+__attribute__((constructor)) static void resolve_libc(void) {
+#define RESOLVE(name) do { *(void **)(&libc_##name) = dlsym(RTLD_NEXT, #name); if (!libc_##name) _exit(125); } while (0)
+    RESOLVE(open); RESOLVE(read); RESOLVE(mmap); RESOLVE(lseek); RESOLVE(fstat); RESOLVE(close);
+    *(void **)(&libc_fxstat) = dlsym(RTLD_NEXT, "__fxstat");
+    atomic_store(&resolved, 1);
+#undef RESOLVE
+}
+#define REAL(name) (atomic_load(&resolved) ? libc_##name : real_##name)
 #define WRAP(name) name
 #define INTERPOSE(name)
 #endif
@@ -127,6 +146,16 @@ int WRAP(fstat)(int fd, struct stat *st) {
     if (s) { add(STAT_NS,tick()-a); add(STAT_N,1); }
     errno=error; return r;
 }
+#ifndef __APPLE__
+/* The pinned x86 Linux Lean binary calls glibc's versioned stat ABI. */
+int __fxstat(int version, int fd, struct stat *st) {
+    unsigned s=state(fd); uint64_t a=s ? tick() : 0;
+    int r=atomic_load(&resolved) && libc_fxstat ? libc_fxstat(version,fd,st) : real_fstat(fd,st);
+    int error=errno;
+    if (s) { add(STAT_NS,tick()-a); add(STAT_N,1); }
+    errno=error; return r;
+}
+#endif
 int WRAP(close)(int fd) {
     unsigned s=state(fd); uint64_t a=s ? tick() : 0;
     /* Clear before close: another thread may reuse the descriptor immediately. */
