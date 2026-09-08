@@ -24,19 +24,31 @@ def summarize(out):
         for b,e,found in es:
             g=groups[(phase(b),bool(found))];g['calls']+=1;g['seconds']+=(e-b)*scale
         r={'name':name,'lookups':[dict(phase=k[0],found=k[1],**v) for k,v in sorted(groups.items())]}
+        r['stages']=[]
+        for b,e in spans:
+            if b['label'] not in ('load','finalize','private_tables','initialize_extensions','run_init_attributes'):continue
+            calls=[x for x in es if b['trace_clock']<=x[0]<e['trace_clock']]
+            wall=(e['trace_clock']-b['trace_clock'])*scale
+            r['stages'].append(dict(phase=b['label'],wall_seconds=wall,
+                failed_calls=sum(not x[2] for x in calls),successful_calls=sum(bool(x[2]) for x in calls),
+                failed_seconds=sum(x[1]-x[0] for x in calls if not x[2])*scale,
+                successful_seconds=sum(x[1]-x[0] for x in calls if x[2])*scale))
         if name.startswith('trace'):
             details=[];_,errors,_=helpers.mac_faults(out/(name+'.stdout'),data['pid'],details);assert not any(errors.values())
-            counts=Counter();pages=defaultdict(Counter);matched=Counter()
+            counts=Counter();pages=defaultdict(Counter);matched=Counter();zero_per_call=Counter()
             for f in details:
                 i=bisect_right(starts,f['begin'])-1
                 within=i>=0 and f['end']<=es[i][1]
                 association=('successful-lookup' if es[i][2] else 'failed-lookup') if within else 'outside-lookup'
                 label=phase(f['begin']);counts[(label,association,f['kind'],f['return_code'])]+=1
                 if within:matched[i]+=1
+                if within and f['kind']=='zero-fill' and f['return_code']==0:zero_per_call[i]+=1
                 if f['kind']=='zero-fill':pages[(label,association)][f['address']]+=1
             r['faults']=[dict(phase=k[0],association=k[1],kind=k[2],return_code=k[3],count=v) for k,v in sorted(counts.items())]
             r['zero_fill_pages']=[dict(phase=k[0],association=k[1],distinct_pages=len(v),top=[dict(address=hex(a),count=n) for a,n in v.most_common(3)]) for k,v in sorted(pages.items())]
             r['calls_with_faults']=len(matched)
+            r['zero_fill_per_call']=[dict(found=found,successful_zero_fills_per_call=n,calls=c)
+                for (found,n),c in sorted(Counter((bool(e[2]),zero_per_call[i]) for i,e in enumerate(es)).items())]
         result['runs'].append(r)
     result['limits']='Only Lean interpreter RTLD_DEFAULT lookups are wrapped. Interval attribution requires nonoverlapping calls; VM events may include unrelated work on another thread. Inclusive lookup times include all lookup work, not just fault handling. Traced timing is diagnostic.'
     return result

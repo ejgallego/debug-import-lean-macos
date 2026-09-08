@@ -32,6 +32,7 @@ jobs:
             # shellcheck disable=SC2024
             sudo ktrace trace -t -N -p dlsym-miss -f S0x0130 -b 64 -T 60 -c results/dlsym-tiny/dlsym-miss unique 77742 > results/dlsym-tiny/trace.txt 2> results/dlsym-tiny/trace.stderr
           fi
+          python3 scripts/summarize-dlsym-tiny.py results/dlsym-tiny
       - uses: actions/upload-artifact@v7
         if: always()
         with:

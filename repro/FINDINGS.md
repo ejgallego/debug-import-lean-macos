@@ -1,5 +1,13 @@
 # Experiment notes
 
+Latest result (September 8): the [standalone dlsym reduction](#standalone-c-reproduction-of-failed-symbol-lookups)
+reproduces the dominant repeated zero-fill stream, and
+[real Lean attribution](#real-lean-lookup-attribution-and-measured-time) measures
+0.72–1.01 s inside failed extension lookups. The
+[Linux fault-around control](#linux-disabling-file-fault-around) explains a large
+counter difference with only an 8% whole-import timing effect. Earlier
+experiments below retain their original scope and caveats.
+
 ## Artifact replay, 2026-09-07
 
 [CI run 34109883721](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34109883721),
@@ -1027,3 +1035,239 @@ for its zero-fill volume. The warm CPU-heavy private-table/parser work and
 `ImportState` release still need native attribution. A faithful reduction should
 model anonymous allocation as well as artifact mappings, and record page policy
 explicitly; raw fault counts alone remain unsuitable as its performance score.
+
+## File fault-around and Mac VM operations (September 8, 2026)
+
+[CI run 34206638460](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34206638460),
+source `d1ce1ac3ff60a4e4168a1133f0222d812369c4be`, tests the next two mechanisms
+with the same pinned Lean, Mathlib, module consumer and one-thread setting.
+Raw artifacts are downloaded to `results/ci-34206638460/{linux,macos}/`.
+
+### Linux: disabling file fault-around
+
+The ARM Linux runner exposes a 65,536-byte fault-around window. Setting
+`/sys/kernel/debug/fault_around_bytes` to its 4,096-byte base page size disables
+fault-around, as defined by the pinned
+[Linux implementation](https://github.com/torvalds/linux/blob/v6.17/mm/memory.c).
+This control changes the ready file pages mapped around a fault; it does not
+change readahead advice. The knob is host-wide and affects native image mappings
+as well as artifacts, so the experiment runs only on a disposable CI host.
+Its original value is read back before/after each target and restored at exit;
+`fault-around-restored.json` confirms 65,536 bytes restored. THP is not disabled
+by this experiment.
+
+All 24 imports and four fault traces validate. Each binary has a warmup in both
+modes and four AB/BA pairs; traces are separate diagnostics. All traced phase
+fault totals reconcile exactly with the target counters. Load/finalize disk-read
+byte deltas are zero in all phase diagnostics. The runner is ARM Neoverse-N2,
+Linux 6.17.0-1022-azure / glibc 2.39, approximately 15.6 GiB RAM, 4 KiB pages.
+
+| Measurement (median of four repeats) | Default 64 KiB window | One page / disabled |
+|---|---:|---:|
+| Stock import elapsed | 3.287 s | 3.552 s |
+| Stock import minor faults | 91,411 | 455,448 |
+| Phase: load elapsed | 0.787 s | 0.772 s |
+| Phase: finalization elapsed | 2.538 s | 2.771 s |
+| Phase: finalization minor faults | 44,282 | 398,948 |
+| Private-table elapsed | 0.524 s | 0.656 s |
+| Private-table minor faults | 13,831.5 | 264,283 |
+| Imported-entries elapsed | 0.137 s | 0.180 s |
+| Imported-entries minor faults | 2,824 | 52,294 |
+| Extension-initialization elapsed | 0.948 s | 0.988 s |
+
+Whole-import faults increase approximately fivefold; elapsed time increases
+about 0.26 s (8.0% comparing medians). All four stock pairs are slower without
+fault-around, with ratios 1.036, 1.083, 1.125 and 1.080. The phase finalization
+ratios are 1.079–1.124. These are same-host, same-binary intervention effects;
+do not use stock versus relinked absolute times as the treatment comparison.
+
+The fault addresses establish where the increase occurs:
+
+| Phase / address class | Default trace 1 | Default trace 2 | One-page trace 1 | One-page trace 2 |
+|---|---:|---:|---:|---:|
+| Private tables: artifact | 13,735 | 13,735 | 264,176 | 264,183 |
+| Private tables: anonymous | 97 | 97 | 97 | 97 |
+| Imported entries: artifact | 2,794 | 2,794 | 52,253 | 52,254 |
+| Imported entries: anonymous | 30 | 30 | 30 | 30 |
+
+This is a file-mapping effect, complementary to the preceding THP experiment's
+anonymous-allocation effect. Phase-specific ratios also depend on mappings
+established by earlier phases; they are not a direct count of how many pages
+every individual fault installed. Linux without fault-around now has more
+private-table artifact faults than the earlier Mac traces, which use 16 KiB
+base pages. Raw cross-platform fault totals still do not represent equal work.
+
+Each trace preserves all 37,687 mmap attempts and 7,303,535,912 requested bytes.
+Three have no fallback; the first one-page trace has three fallback copies.
+Artifact mmap-call totals remain approximately 0.118–0.126 s across both modes.
+Disabling fault-around does not reproduce the Mac saved-address mapping-setup
+penalty. Traced anonymous fault counts still vary with THP behavior, so timing
+claims use the untraced pairs.
+
+The net finding is a large counter effect and a modest time effect. The previous
+THP penalty and this fault-around penalty were measured separately; adding their
+numbers is not a measured combined intervention or a decomposition of the
+Mac/Linux timing gap. Together they substantially explain why the counters
+look different, while leaving the mapping setup and warm CPU work as the main
+performance leads.
+
+### Mac: allocator capture exposes repeated temporary pages
+
+The Mac half of run `34206638460` completes 11 imports, a libc VM-operation
+fixture and two reconciled fault traces. During extension initialization,
+mimalloc makes 4,172 observed `MADV_FREE_REUSE` calls per observer-only import,
+requesting 290.1875 MiB in total and spending 5.62–8.80 ms inside those calls.
+These are requested bytes, potentially revisiting pages. The history associates
+117/96 extension zero-fill events with an observed purge, 12,489/12,508 with an
+observed mapping without purge, and 77,867/77,898 with unknown history. The large
+unknown group prevents treating this capture as evidence that purging explains
+or does not explain all those events.
+
+Counting virtual addresses reveals the crucial distinction:
+
+| Extension zero-fill measurement | Trace 1 | Trace 2 |
+|---|---:|---:|
+| Events | 90,473 | 90,502 |
+| Distinct virtual pages | 12,732 | 12,761 |
+| Events at the most frequent page | 77,742 | 77,742 |
+| Most frequent address | `0x10b9f4000` | `0x10d504000` |
+| Summed handler intervals | 0.199 s | 0.189 s |
+
+All extension zero-fill end records have kernel return code zero, and all start
+records identify a user map. This rules out interpreting these particular
+events as failed probes. It also corrects any interpretation of the earlier
+approximately 90,000 events as 90,000 distinct retained pages: repeated virtual
+addresses do not measure distinct physical allocations or retained memory.
+
+[Run 34208284743](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34208284743),
+source `237bb9a`, adds six Mach VM entry points and a fixture that checks explicit
+allocate/map/protect/copy/read/deallocate calls. All 11 imports and both traces
+validate. The observer now sees libmalloc's `mvm_allocate_pages_plat` and pthread
+stack mappings. Nevertheless, extension initialization still has about 77,790
+zero-fill events with unknown history. In this run the dominant events split
+across two temporary addresses (74,928 + 2,815 and 71,604 + 6,139). There is no
+observed stream of Mach allocations or copies that explains them.
+
+This is a coverage limit of symbol interposition: the old native profile from
+run `34127346438` contains the stack
+`lean::ir::interpreter::lookup_symbol` → `dyld4::APIs::dlsym` →
+`dyld4::APIs::setErrorString` → dyld's own `mach_vm_deallocate` trap.
+Those internally bound dyld calls bypass the observed public entry points.
+That profile, rather than a further allocator-counter census, supplies the
+next concrete hypothesis: failed interpreter symbol lookups create temporary
+VM pages for their diagnostic strings.
+
+### Standalone C reproduction of failed symbol lookups
+
+`repro/dlsym-miss.c` tests this hypothesis with no Lean, artifact files, custom
+allocator or explicit mmap call. It warms successful and failed `dlsym` paths,
+then performs 77,742 calls: repeated `malloc` hits, repeated misses at one absent
+name, or misses at distinct names. The distinct-name case also includes its
+small `snprintf` cost. None of the modes consumes `dlerror` inside the loop.
+
+[Run 34214763598](https://github.com/ejgallego/debug-import-lean-macos/actions/runs/34214763598),
+source `698fb8b7325c3023f310cf8385bf599a2719f0e8`, runs the C reduction on ARM
+macOS and ARM Linux, and separately captures actual Lean lookups. The preceding
+run `34214632089` has only valid Linux C data: its Mac compilation failed because
+the new C files lacked `_DARWIN_C_SOURCE`. The corrected source builds cleanly.
+
+| C loop, median of three repeats | ARM macOS elapsed | ARM Linux elapsed | Mac minor faults | Linux minor faults |
+|---|---:|---:|---:|---:|
+| Repeated successful lookup | 0.139415 s | 0.004937 s | 0 | 2 |
+| Repeated absent name | 0.412244 s | 0.012172 s | 77,742 | 2 |
+| Distinct absent names | 0.420604 s | 0.015685 s | 77,742 | 6 |
+
+Every Mac failed-lookup repeat has exactly one minor fault per call and zero
+major faults. The separate C ktrace validates this directly: within the measured
+loop, **77,742 successful zero-fill events all hit `0x100c7c000`**. The trace has
+no missing event pairs or loss messages, and exactly reconciles with the loop's
+resource-counter deltas. Its elapsed time is 0.454 s; use the untraced repeats
+for the table. These different CI hosts are not a controlled CPU comparison.
+
+The source mechanism matches the native stack and the C observation.
+[dyld 1286.10 `setErrorString`](https://github.com/apple-oss-distributions/dyld/blob/dyld-1286.10/dyld/DyldAPIs.cpp)
+uses `_simple_salloc`, formats the failed-lookup diagnostic, copies it into its
+per-thread error buffer, and calls `_simple_sfree`. The temporary formatter
+buffer is separate from that persistent per-thread buffer.
+[Apple's simple-string implementation](https://github.com/apple-oss-distributions/libplatform/blob/main/src/simple/string_io.c)
+allocates a VM page in `_simple_salloc` and deallocates it in `_simple_sfree`.
+Dyld 1286.10 is the version identified in the earlier native profile; the
+libplatform source link describes the implementation, not a symbolized binary
+proof for every macOS version.
+
+Thus a small program reproduces the repeated-page phenomenon through ordinary
+failed dynamic symbol lookup. It is not evidence of warm artifact-page eviction.
+The full Lean address space and loaded library set can change lookup cost, so
+the C loop's 0.42 s must not be substituted for Lean's measured contribution.
+
+### Real Lean: lookup attribution and measured time
+
+All three jobs in run `34214763598` complete successfully. The Mac Lean job
+validates 11 imports with the pinned module/declaration counts and two complete
+fault traces. `--dlsym` rebuilds the interpreter, replacing only its
+`dlsym(RTLD_DEFAULT, sym)` call site with a recorder that forwards the same call
+and result. The recorder is enabled in three untraced imports and two separate
+ktrace diagnostics; the alternating phase controls execute the same binary
+with lookup recording disabled. The native-symbol cache and import algorithms
+are unchanged. This is attribution, not an optimization intervention.
+
+Each import makes 78,426 failed and 5,200 successful interpreter lookups. Of
+these, **77,742 failures and 5,160 successes occur within extension initialization**,
+including its nested `run_init_attributes` stage. The counts are identical in
+all five recorded imports. A local Linux validation of the rebuilt binary also
+preserves the full workload counts and the same whole-process hit/miss totals.
+
+| Untraced recorded Lean run | Failed extension lookups | Failed lookup time | Successful lookup time | Extension total | Failed lookup share |
+|---|---:|---:|---:|---:|---:|
+| `lookup-1` | 77,742 | 1.0068 s | 0.0074 s | 3.2497 s | 31.0% |
+| `lookup-2` | 77,742 | 0.7926 s | 0.0059 s | 3.1003 s | 25.6% |
+| `lookup-3` | 77,742 | 0.7198 s | 0.0058 s | 2.2626 s | 31.8% |
+
+The main callers are now specific:
+
+| Caller stage | Failed lookups per import | Failed lookup time across the three repeats |
+|---|---:|---:|
+| `Lean.Parser.parserExtension` | 45,173 | 0.368–0.566 s |
+| `run_init_attributes` | 24,290 | 0.250–0.309 s |
+| `Lean.Elab.macroAttribute` | 2,502 | 0.033–0.046 s |
+
+Parser reconstruction and regular initializers together make about 89% of
+extension lookup failures. Lean's pinned interpreter already caches both native
+lookup successes and failures, so "add a negative cache" is not a sufficient
+proposal. A useful next intervention must avoid some first-time probes known
+to miss, while preserving native resolution and interpreter fallback semantics.
+
+The fault intervals directly connect these calls to the earlier anomaly. Both
+traces contain 77,745 successful extension zero-fill events inside failed lookup
+intervals: 77,742 are at the dominant temporary address(es), with three additional
+events elsewhere. Trace 1 uses `0x10b9fc000` for all 77,742; trace 2 splits them
+71,603/6,139 between `0x10ba28000` and `0x10ba38000`. Across each whole process,
+78,423 failed calls contain one successful zero-fill event and three contain two;
+all 5,200 successful calls contain none. The reducer verifies that lookup
+intervals do not overlap. It attributes by target PID and interval; it does not
+record a separate caller thread ID, so this is not a general multi-thread
+attribution method. The C reduction and native stack independently support the
+causal interpretation.
+
+There remain 12,884/12,759 extension zero-fill events outside lookup intervals,
+plus artifact/cache/compression faults. Failed dlsym calls explain the repeated
+temporary-page stream, not every allocation or every finalization cost. Lookup
+time is inclusive of symbol search and error construction; it is not just the
+fault-handler time. Avoiding those lookups has not yet been benchmarked as a
+semantics-preserving Lean change.
+
+This Mac batch remains variable and experiences memory pressure. Recorded
+finalization takes 8.690–12.030 s, with 2,503–6,611 task decompressions and
+0.27–41.27 MiB charged reads. Adjacent unrecorded extension controls take
+2.642–3.212 s, and the final control's outer finalization is 6.079 s. Thus these
+recorded intervals establish a roughly 0.7–1.0 s contributor in this batch; they
+do not provide a fixed overhead estimate or explain the full cross-platform
+import-time ratio. The earlier low-I/O, low-decompression CPU-heavy finalization
+evidence and the independently reproduced saved-address mapping penalty remain
+separate findings.
+
+The next useful work is a controlled way to bypass provably absent native
+symbols, with a same-host import timing comparison, and continued attribution of
+the remaining private-table/parser and temporary-state release work. The counter
+investigation has produced two concrete C reductions and an actual native-call
+cost; continuing to expand fault totals alone is no longer the priority.

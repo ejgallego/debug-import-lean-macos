@@ -448,7 +448,7 @@ hypothesis. The raw launch, target, phase and perf records remain the evidence.
 
 ## File fault-around and macOS VM-operation experiments
 
-`lean-around-purge.yml` prepares two complementary experiments:
+`lean-around-purge.yml` runs two complementary experiments:
 
 - ARM Linux compares the kernel's original `fault_around_bytes` with one base
   page (fault-around disabled). It runs four AB/BA stock pairs, four phase pairs,
@@ -457,7 +457,9 @@ hypothesis. The raw launch, target, phase and perf records remain the evidence.
   Each change is read back; `finally` restores and verifies the original value.
   THP is left at its existing policy. Readahead advice is not changed.
 - ARM macOS records anonymous `mmap`, `munmap`, `mprotect`, and `madvise` calls,
-  including ranges, time, caller, result and thread. Three observer-only imports
+  plus self-task `mach_vm_allocate`, `mach_vm_deallocate`, `mach_vm_map`,
+  `mach_vm_protect`, `mach_vm_copy` and `mach_vm_read_overwrite`, including ranges,
+  time, caller, result and thread. Three observer-only imports
   alternate with phase controls; two additional fault traces provide address
   histories. The fixture checks an explicit map/commit/release/reuse/unmap
   sequence before collecting Lean data. Native symbol addresses and image bases
@@ -471,6 +473,8 @@ LEAN_NUM_THREADS=1 lake env python3 scripts/run-lean-around-purge.py \
   --build results/inner-build --output results/around-purge
 python3 scripts/summarize-lean-faults.py results/around-purge \
   --output results/around-purge/fault-summary.json
+# Linux only:
+python3 scripts/summarize-lean-around.py results/around-purge
 # macOS only:
 python3 scripts/summarize-lean-alloc-vm.py results/around-purge
 ```
@@ -491,7 +495,50 @@ its checks run with `python3 scripts/test-alloc-vm-history.py`.
 
 An observed purge followed by a zero-fill fault at the same address is a
 chronological association, not a causal time estimate. These interposers cover
-selected libc VM calls after initialization, not every Mach VM API or implicit
-kernel reclamation. Requested-byte totals can revisit the same memory. Use the
+selected libc/Mach entry points after initialization; calls bound internally
+inside dyld can bypass them. Kernel reclamation is not observed. Requested-byte
+totals can revisit the same memory. The summary reports distinct zero-fill
+virtual pages, repeated addresses and kernel return codes separately. Use the
 untraced controls for latency claims and verify trace completeness before
 interpreting the history categories.
+
+## Failed dynamic symbol lookups
+
+`dlsym-miss.c` is an independent C reduction of the repeated zero-fill lead:
+
+```sh
+cc -O2 -std=c11 -Wall -Wextra -Werror repro/dlsym-miss.c -o /tmp/dlsym-miss
+/tmp/dlsym-miss hit 77742
+/tmp/dlsym-miss miss 77742
+/tmp/dlsym-miss unique 77742
+```
+
+Add `-ldl` on Linux. `hit` repeatedly looks up `malloc`; `miss` repeats one
+absent name; `unique` queries distinct absent names. Each mode warms the lookup
+and error paths before recording loop time, CPU and process fault deltas.
+No Lean or artifact files are needed. The C test explains a mechanism; its
+library set and address space do not reproduce the full Lean import's latency.
+
+`lean-dlsym.yml` runs the C test on both ARM platforms and separately measures
+actual Lean on ARM macOS. To build the latter, add `--dlsym` to
+`scripts/build-lean-inner.py`. This rebuilds the pinned interpreter in both
+control and instrumented binaries. Only the instrumented interpreter's
+`lookup_symbol_in_cur_exe` call site forwards to a recorder that still calls
+`dlsym(RTLD_DEFAULT, symbol)` and returns its result. There is no global dlsym
+interposer, and the native-symbol cache is unchanged. Rebuilt sources, commands
+and hashes are retained in the build evidence.
+
+```sh
+LEAN_NUM_THREADS=1 lake env python3 scripts/run-lean-around-purge.py \
+  --build results/dlsym-build --output results/dlsym --dlsym
+python3 scripts/summarize-lean-faults.py results/dlsym \
+  --output results/dlsym/fault-summary.json
+python3 scripts/summarize-lean-dlsym.py results/dlsym
+```
+
+Build the I/O observer in the fresh output directory as in the preceding
+workflow. Three recorded imports alternate with phase controls; two separate
+ktrace captures associate faults with lookup intervals. The summary rejects
+overlapping lookup intervals and retains hit/miss counts, inclusive times,
+fault return codes and repeated addresses. It does not equate lookup time with
+fault-handler time or with a measured optimization's benefit.

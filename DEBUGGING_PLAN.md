@@ -420,26 +420,42 @@ warm private-table/parser and temporary-state release costs. Preserve the
 existing mapping-order reproduction and avoid treating fault counts as a proxy
 for latency. See `repro/FINDINGS.md` for paired raw timings and caveats.
 
-### Prepared next experiments (September 8)
+### Fault-around and repeated-page results (September 8)
 
-Branch `experiments/lean-fault-around-purge` prepares a Linux debugfs
-fault-around control and macOS allocator VM-operation capture. The Linux test
-uses the same binaries and workload, checks/restores the runner-wide knob,
-retains balanced stock/phase pairs, and captures faults separately. The Mac test
-records libc map/protection/advice operations with caller symbols, verifies its
-coverage on a fixture, and associates zero-fill events with observed mapping
-and purge histories. Interval-history checks pass locally.
+Publication resumed successfully. Run `34206638460` completes the Linux
+fault-around intervention and initial Mac allocator capture. Disabling the
+65,536-byte Linux window raises stock minor faults from 91,411 to 455,448, but
+elapsed time only from 3.287 to 3.552 s (medians). Private-table artifact faults
+rise from 13,735 to about 264,180 while anonymous faults stay at 97. The original
+host setting is restored and all phase traces reconcile. This is another large
+counter effect with a modest timing effect, separate from the earlier THP test.
 
-At preparation time, CI publication is blocked: the SSH agent refuses signing,
-and the available HTTPS OAuth credential lacks `workflow` scope. No new
-experimental results are claimed until the workflow is published and completes.
+The Mac analysis finds that 77,742 of about 90,000 extension zero-fill events
+repeat one virtual page; all report success. These counts are not a census of
+new retained allocation. Run `34208284743` adds validated Mach VM hooks, but
+dyld's internally bound allocation calls bypass those entry points. Existing
+native profiles identify interpreter `dlsym` failures reaching dyld's
+`setErrorString` and Mach allocation/deallocation routines.
 
-This investigation has not exhausted its useful leads. THP already demonstrates
-that large fault-count differences need not explain large elapsed-time gaps.
-The next controls should either establish a time-relevant mechanism or close
-that line of investigation. If fault-around and allocator purging account for
-little time, stop expanding the counter census and prioritize the independently
-reproduced saved-address mapping setup cost and native attribution of warm
-private-table/parser and temporary-state release work. CI's different CPUs/RAM
-and observer effects still limit cross-platform causal claims; the provisioned
-Mac will be valuable for controlled follow-up.
+The new standalone `repro/dlsym-miss.c` reproduces 77,742 successful zero-fill
+faults at one virtual address from 77,742 absent-symbol lookups on ARM macOS.
+Successful lookups generate none. Apple's source shows a temporary VM page
+allocated/freed while formatting each lookup error. This is a concrete lead
+for the dominant extension fault count, independent of artifact eviction.
+The paired real-Lean lookup capture measures its relevance to import time;
+see `repro/FINDINGS.md` for final run results and limitations.
+
+Run `34214763598` confirms the connection in actual Lean: failed lookups take
+0.72–1.01 s, or 25.6–31.8% of extension initialization in the three untraced
+recordings. Parser reconstruction makes 45,173 of the 77,742 extension misses;
+regular initializers make 24,290. The interpreter already caches negative
+results. A follow-up must target first-time probes, not propose an existing
+negative cache as a new fix.
+
+Keep the next steps focused on time attribution: quantify interpreter lookup
+cost, then test a semantics-preserving way to avoid lookups known to fail.
+Continue the independently reproduced saved-address mapping setup investigation
+and native attribution of private tables, parser reconstruction and temporary
+`ImportState` release. We have useful leads, but CI's different CPUs/RAM and
+observer effects still limit cross-platform causal claims. The provisioned Mac
+will help test mapping-order behavior and memory pressure under stable conditions.
