@@ -1,0 +1,63 @@
+name: Lean file fault-around and allocator VM operations
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiments/lean-fault-around-purge]
+permissions:
+  contents: read
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      LEAN_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linux tools and fault-around capability
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang libc++-18-dev linux-tools-common "linux-tools-$(uname -r)"
+          sudo cat /sys/kernel/debug/fault_around_bytes
+      - uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: false
+      - name: Download pinned artifacts and source
+        run: |
+          lake exe cache get
+          git diff --exit-code -- lean-toolchain lake-manifest.json
+          mkdir -p results/source results/around-purge
+          curl -fsSL https://codeload.github.com/leanprover/lean4/tar.gz/58774429865502f05c63239266aac30ef1e91ef7 -o results/source.tar.gz
+          tar -xzf results/source.tar.gz -C results/source --strip-components=1
+      - name: Build instrumented Lean and observers
+        shell: bash
+        run: |
+          python3 scripts/build-lean-inner.py --source results/source --output results/rebuild
+          if [ "$RUNNER_OS" = macOS ]; then
+            cc -O2 -g -std=c11 -Wall -Wextra -Werror -dynamiclib repro/lean-alloc-vm.c -o results/around-purge/lean-alloc-vm.dylib
+            cc -O2 -std=c11 -Wall -Wextra -Werror -dynamiclib repro/lean-io-timing.c -o results/around-purge/lean-io-timing.dylib
+            nm -n results/rebuild/instrumented/bin/lean > results/around-purge/lean-symbols.txt
+            csrutil status > results/around-purge/sip-status.txt
+          else
+            cc -O2 -std=c11 -Wall -Wextra -Werror -shared -fPIC repro/lean-io-timing.c -ldl -o results/around-purge/lean-io-timing.so
+          fi
+      - name: Run paired timing and separate trace measurements
+        run: lake env python3 scripts/run-lean-around-purge.py --build results/rebuild --output results/around-purge
+      - name: Validate fault captures
+        run: python3 scripts/summarize-lean-faults.py results/around-purge --output results/around-purge/fault-summary.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lean-around-purge-${{ matrix.runner }}
+          path: |
+            results/around-purge/
+            results/rebuild/build.json
+            results/rebuild/Environment.patch
+          retention-days: 30
