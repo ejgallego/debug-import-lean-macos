@@ -445,3 +445,53 @@ ratios as well as the separate page census. `fault-summary.json` retains address
 classes and phase-count reconciliation. A default run with no observed huge pages
 is explicitly identified, since disabling an unused mechanism would not test the
 hypothesis. The raw launch, target, phase and perf records remain the evidence.
+
+## File fault-around and macOS VM-operation experiments
+
+`lean-around-purge.yml` prepares two complementary experiments:
+
+- ARM Linux compares the kernel's original `fault_around_bytes` with one base
+  page (fault-around disabled). It runs four AB/BA stock pairs, four phase pairs,
+  and two separate trace pairs, preserving warmups separately. This debugfs
+  setting is host-wide, so run this experiment on a disposable dedicated runner.
+  Each change is read back; `finally` restores and verifies the original value.
+  THP is left at its existing policy. Readahead advice is not changed.
+- ARM macOS records anonymous `mmap`, `munmap`, `mprotect`, and `madvise` calls,
+  including ranges, time, caller, result and thread. Three observer-only imports
+  alternate with phase controls; two additional fault traces provide address
+  histories. The fixture checks an explicit map/commit/release/reuse/unmap
+  sequence before collecting Lean data. Native symbol addresses and image bases
+  identify callers in the pinned Lean binary.
+
+After building the pinned frontend and the observer libraries in a fresh
+`results/around-purge` directory, run:
+
+```sh
+LEAN_NUM_THREADS=1 lake env python3 scripts/run-lean-around-purge.py \
+  --build results/inner-build --output results/around-purge
+python3 scripts/summarize-lean-faults.py results/around-purge \
+  --output results/around-purge/fault-summary.json
+# macOS only:
+python3 scripts/summarize-lean-alloc-vm.py results/around-purge
+```
+
+The Mac observer is built with:
+
+```sh
+cc -O2 -g -std=c11 -Wall -Wextra -Werror -dynamiclib repro/lean-alloc-vm.c \
+  -o results/around-purge/lean-alloc-vm.dylib
+python3 scripts/check-alloc-vm-fixture.py results/around-purge
+nm -n results/inner-build/instrumented/bin/lean > results/around-purge/lean-symbols.txt
+```
+
+Build the existing `lean-io-timing` library in that output directory too. The
+workflow performs all preparation and retains raw data. The history reducer
+splits address intervals for partial purges/unmaps and resets history on remap;
+its checks run with `python3 scripts/test-alloc-vm-history.py`.
+
+An observed purge followed by a zero-fill fault at the same address is a
+chronological association, not a causal time estimate. These interposers cover
+selected libc VM calls after initialization, not every Mach VM API or implicit
+kernel reclamation. Requested-byte totals can revisit the same memory. Use the
+untraced controls for latency claims and verify trace completeness before
+interpreting the history categories.

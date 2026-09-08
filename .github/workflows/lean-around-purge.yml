@@ -43,6 +43,7 @@ jobs:
           if [ "$RUNNER_OS" = macOS ]; then
             cc -O2 -g -std=c11 -Wall -Wextra -Werror -dynamiclib repro/lean-alloc-vm.c -o results/around-purge/lean-alloc-vm.dylib
             cc -O2 -std=c11 -Wall -Wextra -Werror -dynamiclib repro/lean-io-timing.c -o results/around-purge/lean-io-timing.dylib
+            python3 scripts/check-alloc-vm-fixture.py results/around-purge
             nm -n results/rebuild/instrumented/bin/lean > results/around-purge/lean-symbols.txt
             csrutil status > results/around-purge/sip-status.txt
           else
@@ -52,6 +53,9 @@ jobs:
         run: lake env python3 scripts/run-lean-around-purge.py --build results/rebuild --output results/around-purge
       - name: Validate fault captures
         run: python3 scripts/summarize-lean-faults.py results/around-purge --output results/around-purge/fault-summary.json
+      - name: Attribute Mac allocator operations
+        if: runner.os == 'macOS'
+        run: python3 scripts/summarize-lean-alloc-vm.py results/around-purge
       - uses: actions/upload-artifact@v7
         if: always()
         with:

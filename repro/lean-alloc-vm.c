@@ -45,6 +45,15 @@ static int observe_madvise(void *a,size_t n,int advice) {
 }
 #define INTERPOSE(name) __attribute__((used)) static struct { const void *replacement,*original; } interpose_##name __attribute__((section("__DATA,__interpose")))={ (void *)observe_##name,(void *)name }
 INTERPOSE(mmap); INTERPOSE(munmap); INTERPOSE(mprotect); INTERPOSE(madvise);
+static void quoted(FILE *f,const char *s) {
+    fputc('"',f);
+    if (s) for (;*s;s++) {
+        unsigned char c=(unsigned char)*s;
+        if (c=='"' || c=='\\') fputc('\\',f);
+        if (c<32) fprintf(f,"\\u%04x",c); else fputc(c,f);
+    }
+    fputc('"',f);
+}
 __attribute__((destructor)) static void report(void) {
     if (!output) return;
     FILE *f=fopen(output,"w");if (!f) return;
@@ -52,9 +61,10 @@ __attribute__((destructor)) static void report(void) {
     fprintf(f,"{\"pid\":%d,\"overflow\":%s,\"timebase_numer\":%u,\"timebase_denom\":%u,\"events\":[",getpid(),n>CAPACITY ? "true" : "false",tb.numer,tb.denom);
     for (unsigned i=0;i<n && i<CAPACITY;i++) {
         struct event *e=&events[i];Dl_info info={0};dladdr((void *)(uintptr_t)e->caller,&info);
-        fprintf(f,"%s{\"kind\":%d,\"begin\":%llu,\"end\":%llu,\"address\":%llu,\"size\":%llu,\"arg\":%d,\"result\":%llu,\"error\":%d,\"caller\":%llu,\"image_base\":%llu,\"thread\":%llu}",i ? ",\n" : "\n",e->kind,
+        fprintf(f,"%s{\"kind\":%d,\"begin\":%llu,\"end\":%llu,\"address\":%llu,\"size\":%llu,\"arg\":%d,\"result\":%llu,\"error\":%d,\"caller\":%llu,\"image_base\":%llu,\"thread\":%llu",i ? ",\n" : "\n",e->kind,
             (unsigned long long)e->begin,(unsigned long long)e->end,(unsigned long long)e->address,(unsigned long long)e->size,e->arg,
             (unsigned long long)e->result,e->error,(unsigned long long)e->caller,(unsigned long long)(uintptr_t)info.dli_fbase,(unsigned long long)e->thread);
+        fputs(",\"image\":",f);quoted(f,info.dli_fname);fputs(",\"symbol\":",f);quoted(f,info.dli_sname);fputc('}',f);
     }
     fputs("]}\n",f);fclose(f);
 }

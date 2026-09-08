@@ -419,3 +419,27 @@ lifetimes for zero-fill behavior, and focused native attribution of the remainin
 warm private-table/parser and temporary-state release costs. Preserve the
 existing mapping-order reproduction and avoid treating fault counts as a proxy
 for latency. See `repro/FINDINGS.md` for paired raw timings and caveats.
+
+### Prepared next experiments (September 8)
+
+Branch `experiments/lean-fault-around-purge` prepares a Linux debugfs
+fault-around control and macOS allocator VM-operation capture. The Linux test
+uses the same binaries and workload, checks/restores the runner-wide knob,
+retains balanced stock/phase pairs, and captures faults separately. The Mac test
+records libc map/protection/advice operations with caller symbols, verifies its
+coverage on a fixture, and associates zero-fill events with observed mapping
+and purge histories. Interval-history checks pass locally.
+
+At preparation time, CI publication is blocked: the SSH agent refuses signing,
+and the available HTTPS OAuth credential lacks `workflow` scope. No new
+experimental results are claimed until the workflow is published and completes.
+
+This investigation has not exhausted its useful leads. THP already demonstrates
+that large fault-count differences need not explain large elapsed-time gaps.
+The next controls should either establish a time-relevant mechanism or close
+that line of investigation. If fault-around and allocator purging account for
+little time, stop expanding the counter census and prioritize the independently
+reproduced saved-address mapping setup cost and native attribution of warm
+private-table/parser and temporary-state release work. CI's different CPUs/RAM
+and observer effects still limit cross-platform causal claims; the provisioned
+Mac will be valuable for controlled follow-up.
