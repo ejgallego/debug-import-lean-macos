@@ -1,6 +1,8 @@
 name: Lean dyld symbol lookup attribution
 on:
   workflow_dispatch:
+  push:
+    branches: [experiments/lean-dlsym]
 permissions:
   contents: read
 jobs:
