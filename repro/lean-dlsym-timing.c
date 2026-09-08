@@ -1,5 +1,6 @@
 /* Called only at Lean's RTLD_DEFAULT lookup site, preserving dlsym semantics. */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <stdint.h>

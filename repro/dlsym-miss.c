@@ -2,6 +2,7 @@
  * ./dlsym-miss hit|miss|unique [count]
  * No Lean, artifact files, allocator replacement, or tracing required. */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
