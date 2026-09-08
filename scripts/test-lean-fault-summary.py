@@ -20,6 +20,11 @@ class TraceTests(unittest.TestCase):
         text='100 0.0 1300009 1 1234000 0 0 abc 0(AP) lean(42)\nLOST EVENTS\nmalformed 130000a\n'
         faults,errors,_=self.parse(text,m.mac_faults)
         self.assertFalse(faults);self.assertEqual(errors,{'loss_messages':1,'unparsed_fault_lines':1,'unfinished':1})
+    def test_mac_return_code_is_separate_from_fault_type(self):
+        details=[]
+        text='100 0.0 1300009 1 1234000 1 0 abc 0(AP) lean(42)\n101 0.1(0.1) 130000a 1 1234000 2 1 abc 0(AP) lean(42)\n'
+        self.parse(text,lambda p,pid:m.mac_faults(p,pid,details))
+        self.assertEqual(details,[dict(begin=100,end=101,address=0x1234000,kind='zero-fill',thread=0xabc,kernel_map=1,return_code=2)])
     def test_linux_timestamp_address_and_identity(self):
         text='lean 42/43 123.000001: minor-faults: 1234000\nlean 44/44 123.1: major-faults: 1234000\n'
         faults,errors,other=self.parse(text,m.linux_faults)

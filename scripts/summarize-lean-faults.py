@@ -59,7 +59,7 @@ def read_lines(path):
         yield from f
 
 
-def mac_faults(path,pid):
+def mac_faults(path,pid,details=None):
     pending={};faults=[];errors=Counter();other_pids=Counter()
     pattern=re.compile(r'^\s*(\d+)\s+[\d.]+(?:\([^)]*\))?\s+(130000[9a])\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)\s+\S+\s+.*\((\d+)\)\s*$')
     for line in read_lines(path):
@@ -73,12 +73,16 @@ def mac_faults(path,pid):
         clock=int(clock);addr=int(addr,16)
         if code.endswith('9'):
             if thread in pending:errors['duplicate_start']+=1
-            pending[thread]=(clock,addr)
+            pending[thread]=(clock,addr,int(arg3,16))
         elif thread not in pending:errors['orphan_end']+=1
         else:
-            begin,firstaddr=pending.pop(thread)
+            begin,firstaddr,kernel_map=pending.pop(thread)
             if addr!=firstaddr:errors['address_mismatch']+=1
-            faults.append((begin,clock,addr,TYPES.get(int(arg4,16),'unknown-'+arg4)))
+            kind=TYPES.get(int(arg4,16),'unknown-'+arg4)
+            faults.append((begin,clock,addr,kind))
+            if details is not None:
+                details.append(dict(begin=begin,end=clock,address=addr,kind=kind,
+                                    thread=int(thread,16),kernel_map=kernel_map,return_code=int(arg3,16)))
     errors['unfinished']=len(pending)
     return faults,dict(errors),dict(other_pids)
 

@@ -15,10 +15,11 @@ def module(name,path):
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--build',type=Path,required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--build',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--dlsym',action='store_true');a=p.parse_args()
     out=a.output.resolve();out.mkdir(parents=True,exist_ok=True)
     if (out/'metadata.json').exists():p.error('fresh output required')
     mac=sys.platform=='darwin';build=json.loads((a.build/'build.json').read_text());profile=module('profile','scripts/profile-lean-import.py');inner=module('inner','scripts/summarize-lean-inner.py')
+    if a.dlsym and not mac:p.error('the Lean dlsym capture currently requires macOS')
     knob='/sys/kernel/debug/fault_around_bytes';original=None
     if not mac:original=int(subprocess.check_output(['sudo','cat',knob],text=True))
     pin=next(x['rev'] for x in json.loads(Path('lake-manifest.json').read_text())['packages'] if x['name']=='mathlib')
@@ -26,13 +27,14 @@ def main():
     meta={'source_commit':profile.capture(['git','rev-parse','HEAD']),'build':build,'system':platform.platform(),'page_size':os.sysconf('SC_PAGE_SIZE'),
           'memory_bytes':int(profile.capture(['sysctl','-n','hw.memsize'])) if mac else os.sysconf('SC_PHYS_PAGES')*os.sysconf('SC_PAGE_SIZE'),
           'cpu':profile.capture(['sysctl','-n','machdep.cpu.brand_string']) if mac else profile.capture(['lscpu']),
-          'mathlib':pin,'workload':Path('ImportMathlibModule.lean').read_text(),'fault_around_original':original,'threads':os.environ.get('LEAN_NUM_THREADS')}
+          'mathlib':pin,'workload':Path('ImportMathlibModule.lean').read_text(),'fault_around_original':original,'threads':os.environ.get('LEAN_NUM_THREADS'),'dlsym':a.dlsym}
     (out/'metadata.json').write_text(json.dumps(meta,indent=2))
     cases=[]
     if mac:
         cases=[('stock-initial','stock','default'),('phase-initial','phase','default')]
         for i in range(1,4):
-            order=['phase','alloc'] if i%2 else ['alloc','phase']
+            observer='lookup' if a.dlsym else 'alloc'
+            order=['phase',observer] if i%2 else [observer,'phase']
             cases.extend((f'{k}-{i}',k,'default') for k in order)
         cases += [('trace-1','trace','default'),('phase-after','phase','default'),('trace-2','trace','default')]
     else:
@@ -50,7 +52,9 @@ def main():
             if not mac:set_knob(original if mode=='default' else os.sysconf('SC_PAGE_SIZE'))
             env={};command=[build['stock' if kind=='stock' else 'instrumented'],'ImportMathlibModule.lean']
             if kind!='stock':env.update({'LEAN_INNER_TIMING_OUTPUT':str(out/(name+'-events.json')),'LEAN_MEMORY_TIMING':'1'})
-            if mac and kind in ('alloc','trace'):
+            if a.dlsym and kind in ('lookup','trace'):
+                env['LEAN_DLSYM_OUTPUT']=str(out/(name+'-dlsym.json'))
+            if mac and not a.dlsym and kind in ('alloc','trace'):
                 env.update({'DYLD_INSERT_LIBRARIES':str(out/'lean-alloc-vm.dylib'),'LEAN_ALLOC_VM_OUTPUT':str(out/(name+'-alloc.json'))})
             if kind=='trace':
                 preload='DYLD_INSERT_LIBRARIES' if mac else 'LD_PRELOAD';io=str(out/('lean-io-timing.dylib' if mac else 'lean-io-timing.so'))
@@ -71,7 +75,9 @@ def main():
             if kind!='stock':
                 events=json.loads((out/(name+'-events.json')).read_text());r['inner']=inner.summarize(events)
                 assert r['inner']['counts']=={'modules':10690,'private_constants':643468,'public_constants':643468,'extra_constant_names':544977,'initial_extensions':224}
-            if mac and kind in ('alloc','trace'):
+            if a.dlsym and kind in ('lookup','trace'):
+                lookup=json.loads((out/(name+'-dlsym.json')).read_text());assert not lookup['overflow'] and lookup['pid']==events['pid'] and lookup['events']
+            if mac and not a.dlsym and kind in ('alloc','trace'):
                 alloc=json.loads((out/(name+'-alloc.json')).read_text());assert not alloc['overflow'] and alloc['pid']==events['pid'] and alloc['events']
             if kind=='trace' and not mac:
                 data=out/(name+'.data');subprocess.run(['sudo','chmod','a+r',str(data)],check=True)

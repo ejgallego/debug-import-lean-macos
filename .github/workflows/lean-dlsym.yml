@@ -1,0 +1,78 @@
+name: Lean dyld symbol lookup attribution
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tiny:
+    strategy:
+      matrix:
+        runner: [macos-15, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and run standalone reduction
+        shell: bash
+        run: |
+          mkdir -p results/dlsym-tiny
+          flags=()
+          if [ "$RUNNER_OS" = Linux ]; then flags=(-ldl); fi
+          cc -O2 -std=c11 -Wall -Wextra -Werror repro/dlsym-miss.c "${flags[@]}" -o results/dlsym-tiny/dlsym-miss
+          uname -a > results/dlsym-tiny/system.txt
+          cc --version > results/dlsym-tiny/compiler.txt
+          for round in 1 2 3; do
+            for mode in hit miss unique; do
+              results/dlsym-tiny/dlsym-miss "$mode" 77742 > "results/dlsym-tiny/$mode-$round.json"
+            done
+          done
+          if [ "$RUNNER_OS" = macOS ]; then
+            # Capture in a runner-owned file; only the tracer needs privilege.
+            # shellcheck disable=SC2024
+            sudo ktrace trace -t -N -p dlsym-miss -f S0x0130 -b 64 -T 60 -c results/dlsym-tiny/dlsym-miss unique 77742 > results/dlsym-tiny/trace.txt 2> results/dlsym-tiny/trace.stderr
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: dlsym-tiny-${{ matrix.runner }}
+          path: results/dlsym-tiny/
+          retention-days: 30
+  lean:
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      LEAN_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: false
+      - name: Download pinned artifacts and source
+        run: |
+          lake exe cache get
+          git diff --exit-code -- lean-toolchain lake-manifest.json
+          mkdir -p results/source results/dlsym
+          curl -fsSL https://codeload.github.com/leanprover/lean4/tar.gz/58774429865502f05c63239266aac30ef1e91ef7 -o results/source.tar.gz
+          tar -xzf results/source.tar.gz -C results/source --strip-components=1
+      - name: Build and record lookups
+        run: |
+          python3 scripts/build-lean-inner.py --source results/source --output results/rebuild --dlsym
+          cc -O2 -std=c11 -Wall -Wextra -Werror -dynamiclib repro/lean-io-timing.c -o results/dlsym/lean-io-timing.dylib
+          lake env python3 scripts/run-lean-around-purge.py --build results/rebuild --output results/dlsym --dlsym
+      - name: Validate and attribute fault captures
+        run: |
+          python3 scripts/summarize-lean-faults.py results/dlsym --output results/dlsym/fault-summary.json
+          python3 scripts/summarize-lean-dlsym.py results/dlsym
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lean-dlsym-macos-15
+          path: |
+            results/dlsym/
+            results/rebuild/build.json
+            results/rebuild/Environment.patch
+            results/rebuild/*-ir.cpp
+          retention-days: 30

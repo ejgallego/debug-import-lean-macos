@@ -68,7 +68,19 @@ def summarize(out):
             g=groups[key];g['calls']+=1;g['requested_bytes']+=e['size'];g['elapsed_ns']+=(e['end']-e['begin'])*scale;g['errors']+=int(e['error']!=0)
         r={'name':name,'operation_groups':[dict(phase=k[0],kind=k[1],arg=k[2],caller_symbol=k[3],**v) for k,v in sorted(groups.items())]}
         if name.startswith('trace'):
-            faults,errors,_=helpers.mac_faults(out/(name+'.stdout'),data['pid']);assert not any(errors.values())
+            details=[]
+            faults,errors,_=helpers.mac_faults(out/(name+'.stdout'),data['pid'],details);assert not any(errors.values())
+            by_phase=defaultdict(list)
+            for f in details:
+                if f['kind']=='zero-fill' and f['begin']<ends:by_phase[phase(f['begin'])].append(f)
+            r['zero_fill_addresses']=[]
+            for label,fs in sorted(by_phase.items()):
+                pages=Counter(f['address']//meta['page_size']*meta['page_size'] for f in fs)
+                r['zero_fill_addresses'].append(dict(phase=label,events=len(fs),distinct_pages=len(pages),
+                    return_codes=dict(Counter(str(f['return_code']) for f in fs)),
+                    kernel_map_events=sum(f['kernel_map']!=0 for f in fs),
+                    handler_seconds=sum(f['end']-f['begin'] for f in fs)*scale/1e9,
+                    most_frequent_pages=[dict(address=hex(a),events=n) for a,n in pages.most_common(5)]))
             operations=iter(sorted((e for e in data['events'] if not e['error'] and e['end']<ends),key=lambda e:e['end']))
             op=next(operations,None);history=Histories();counts=Counter()
             for begin,end,address,kind in sorted(faults):
@@ -83,7 +95,7 @@ def summarize(out):
                 counts[(phase(begin),origin)]+=1
             r['zero_fill_history']=[dict(phase=k[0],history=k[1],count=v) for k,v in sorted(counts.items())]
         result['runs'].append(r)
-    result['limits']='Only observed libc VM calls, not all Mach VM APIs or kernel reclamation. History begins after observer initialization. Counts after purge are temporal/address associations, not a causal latency estimate. Requested byte totals may revisit the same pages.'
+    result['limits']='Observed libc and selected Mach VM entry points; internal calls may bypass interposition, and kernel reclamation is not observed. History begins after observer initialization and applies completed operations; faults inside an operation need separate interval correlation. Older captures contain only libc calls. Counts after purge are temporal/address associations, not a causal latency estimate. Requested bytes may revisit pages; distinct virtual pages are not distinct physical allocations.'
     return result
 
 

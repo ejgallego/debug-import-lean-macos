@@ -17,6 +17,7 @@ def main():
     p.add_argument('--source',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--libcxx-include',type=Path)
+    p.add_argument('--dlsym',action='store_true',help='also rebuild the interpreter and time its RTLD_DEFAULT lookups')
     args=p.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=True)
     if (out/'build.json').exists():p.error('use a fresh build output')
     prefix=Path(subprocess.check_output(['lean','--print-prefix'],text=True).strip())
@@ -41,12 +42,23 @@ def main():
     cxx+=['-I',src,'-I',prefix/'include','-I',prefix/'include/lean','-I',out]
     run(cxx+['-c',src/'util/shell.cpp','-o',out/'shell.o'])
     run(['cc','-O2','-std=c11','-Wall','-Wextra','-Werror','-DLEAN_EXPORTING','-I',prefix/'include','-c','repro/lean-inner-timing.c','-o',out/'inner-timing.o'])
+    if args.dlsym:
+        run(['cc','-O2','-std=c11','-Wall','-Wextra','-Werror','-c','repro/lean-dlsym-timing.c','-o',out/'dlsym-timing.o'])
     for name,lean_source,root in [('control',original,src),('instrumented',patched,patched.parents[1])]:
         generated=out/(name+'.c');obj=out/(name+'.o');dest=out/name
         run([prefix/'bin/lean','--root='+str(root),'-c',generated,lean_source])
         run([prefix/'bin/leanc','-O3','-DLEAN_EXPORTING','-c',generated,'-o',obj])
         (dest/'bin').mkdir(parents=True);(dest/'lib').symlink_to(prefix/'lib',target_is_directory=True)
         inputs=[src/'shell/lean.cpp',out/'shell.o',obj]
+        if args.dlsym:
+            ir=src/'library/ir_interpreter.cpp';text=ir.read_text()
+            if name=='instrumented':
+                assert text.count('return dlsym(RTLD_DEFAULT, sym);')==1
+                text='extern "C" void *lean_observe_dlsym(char const *);\n'+text.replace('return dlsym(RTLD_DEFAULT, sym);','return lean_observe_dlsym(sym);')
+            rebuilt=out/(name+'-ir.cpp');rebuilt.write_text(text)
+            run(cxx+['-c',rebuilt,'-o',out/(name+'-ir.o')])
+            inputs+=[out/(name+'-ir.o')]
+            if name=='instrumented':inputs+=[out/'dlsym-timing.o']
         if name=='instrumented':inputs+=[out/'inner-timing.o']
         export='-Wl,-export_dynamic' if sys.platform=='darwin' else '-Wl,--export-dynamic'
         run([prefix/'bin/leanc','-O3',*inputs,export,'-o',dest/'bin/lean'])
@@ -55,6 +67,7 @@ def main():
            Path(__file__),Path('scripts/instrument-lean-environment.py'),out/'control.c',out/'instrumented.c',
            out/'control/bin/lean',out/'instrumented/bin/lean',prefix/'bin/lean']
     files+=list((prefix/'lib/lean').glob('*.a'))
+    if args.dlsym:files += [src/'library/ir_interpreter.cpp',out/'control-ir.cpp',out/'instrumented-ir.cpp',Path('repro/lean-dlsym-timing.c')]
     meta={'pin':PIN,'lean':version,'system':platform.platform(),'commands':commands,
           'stock':str(prefix/'bin/lean'),'control':str(out/'control/bin/lean'),
           'instrumented':str(out/'instrumented/bin/lean'),
