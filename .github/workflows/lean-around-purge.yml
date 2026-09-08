@@ -1,6 +1,12 @@
 name: Lean file fault-around and allocator VM operations
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Runner selection
+        type: choice
+        options: [both, linux, macos]
+        default: both
   push:
     branches: [experiments/lean-fault-around-purge]
 permissions:
@@ -10,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04-arm, macos-15]
+        runner: ${{ fromJSON(inputs.platform == 'linux' && '["ubuntu-24.04-arm"]' || inputs.platform == 'macos' && '["macos-15"]' || '["ubuntu-24.04-arm","macos-15"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     env:
@@ -53,6 +59,9 @@ jobs:
         run: lake env python3 scripts/run-lean-around-purge.py --build results/rebuild --output results/around-purge
       - name: Validate fault captures
         run: python3 scripts/summarize-lean-faults.py results/around-purge --output results/around-purge/fault-summary.json
+      - name: Summarize Linux fault-around pairs
+        if: runner.os == 'Linux'
+        run: python3 scripts/summarize-lean-around.py results/around-purge
       - name: Attribute Mac allocator operations
         if: runner.os == 'macOS'
         run: python3 scripts/summarize-lean-alloc-vm.py results/around-purge

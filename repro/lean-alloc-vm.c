@@ -3,6 +3,8 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <mach/mach_time.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -11,7 +13,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#define CAPACITY 100000
+#define CAPACITY 300000
 struct event { uint64_t begin,end,address,size,result,caller,thread; int kind,arg,error; };
 static struct event events[CAPACITY];
 static _Atomic unsigned used;
@@ -43,8 +45,35 @@ static int observe_madvise(void *a,size_t n,int advice) {
     uint64_t t=output ? mach_absolute_time() : 0; int r=madvise(a,n,advice),err=errno;
     record(4,t,a,n,advice,r,r ? err : 0,__builtin_return_address(0)); errno=err;return r;
 }
+/* Mach API coverage is needed for libmalloc and VM-copy/read helpers that
+ * bypass libc mmap/madvise. Only observe operations on this process. */
+static kern_return_t observe_mach_vm_allocate(vm_map_t task,mach_vm_address_t *a,mach_vm_size_t n,int flags) {
+    uint64_t t=mach_absolute_time();kern_return_t r=mach_vm_allocate(task,a,n,flags);
+    if (task==mach_task_self()) record(5,t,(void *)(uintptr_t)*a,n,flags,r,r,__builtin_return_address(0));return r;
+}
+static kern_return_t observe_mach_vm_deallocate(vm_map_t task,mach_vm_address_t a,mach_vm_size_t n) {
+    uint64_t t=mach_absolute_time();kern_return_t r=mach_vm_deallocate(task,a,n);
+    if (task==mach_task_self()) record(6,t,(void *)(uintptr_t)a,n,0,r,r,__builtin_return_address(0));return r;
+}
+static kern_return_t observe_mach_vm_map(vm_map_t task,mach_vm_address_t *a,mach_vm_size_t n,mach_vm_offset_t mask,int flags,mem_entry_name_port_t object,memory_object_offset_t off,boolean_t copy,vm_prot_t cur,vm_prot_t max,vm_inherit_t inherit) {
+    uint64_t t=mach_absolute_time();kern_return_t r=mach_vm_map(task,a,n,mask,flags,object,off,copy,cur,max,inherit);
+    if (task==mach_task_self()) record(7,t,(void *)(uintptr_t)*a,n,cur,r,r,__builtin_return_address(0));return r;
+}
+static kern_return_t observe_mach_vm_protect(vm_map_t task,mach_vm_address_t a,mach_vm_size_t n,boolean_t maximum,vm_prot_t prot) {
+    uint64_t t=mach_absolute_time();kern_return_t r=mach_vm_protect(task,a,n,maximum,prot);
+    if (task==mach_task_self()) record(8,t,(void *)(uintptr_t)a,n,prot,r,r,__builtin_return_address(0));return r;
+}
+static kern_return_t observe_mach_vm_copy(vm_map_t task,mach_vm_address_t src,mach_vm_size_t n,mach_vm_address_t dst) {
+    uint64_t t=mach_absolute_time();kern_return_t r=mach_vm_copy(task,src,n,dst);
+    if (task==mach_task_self()) record(9,t,(void *)(uintptr_t)src,n,0,dst,r,__builtin_return_address(0));return r;
+}
+static kern_return_t observe_mach_vm_read_overwrite(vm_map_t task,mach_vm_address_t src,mach_vm_size_t n,mach_vm_address_t dst,mach_vm_size_t *actual) {
+    uint64_t t=mach_absolute_time();kern_return_t r=mach_vm_read_overwrite(task,src,n,dst,actual);
+    if (task==mach_task_self()) record(10,t,(void *)(uintptr_t)src,n,0,dst,r,__builtin_return_address(0));return r;
+}
 #define INTERPOSE(name) __attribute__((used)) static struct { const void *replacement,*original; } interpose_##name __attribute__((section("__DATA,__interpose")))={ (void *)observe_##name,(void *)name }
 INTERPOSE(mmap); INTERPOSE(munmap); INTERPOSE(mprotect); INTERPOSE(madvise);
+INTERPOSE(mach_vm_allocate); INTERPOSE(mach_vm_deallocate); INTERPOSE(mach_vm_map); INTERPOSE(mach_vm_protect); INTERPOSE(mach_vm_copy); INTERPOSE(mach_vm_read_overwrite);
 static void quoted(FILE *f,const char *s) {
     fputc('"',f);
     if (s) for (;*s;s++) {

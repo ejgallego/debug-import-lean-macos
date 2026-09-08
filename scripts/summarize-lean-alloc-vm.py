@@ -74,7 +74,7 @@ def summarize(out):
             for begin,end,address,kind in sorted(faults):
                 if begin>=ends:break
                 while op is not None and op['end']<=begin:
-                    effect='map' if op['kind']==1 else 'unmap' if op['kind']==2 else 'purge' if op['kind']==4 and op['arg'] in (fixture['dontneed'],fixture['free'],release) else None
+                    effect='map' if op['kind'] in (1,5,7) else 'unmap' if op['kind'] in (2,6) else 'purge' if op['kind']==4 and op['arg'] in (fixture['dontneed'],fixture['free'],release) else None
                     if effect:history.apply(op['address'],op['address']+op['size'],effect)
                     op=next(operations,None)
                 if kind!='zero-fill':continue
